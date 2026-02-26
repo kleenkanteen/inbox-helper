@@ -128,10 +128,7 @@ export default function Home() {
 				<div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-6 py-10">
 					<header className="flex flex-wrap items-center justify-between gap-3">
 						<div>
-							<h1 className="font-bold text-3xl">Inbox Buckets</h1>
-							<p className="text-slate-600 text-sm">
-								Latest 200 Gmail threads grouped by LLM classification.
-							</p>
+							<h1 className="font-bold text-3xl">Eagle Eye</h1>
 						</div>
 					<div className="flex gap-2">
 						<button

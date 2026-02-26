@@ -34,6 +34,14 @@ export default defineSchema({
 		reason: v.optional(v.string()),
 		updatedAt: v.number(),
 	}).index("by_user_thread", ["userId", "threadId"]),
+	emailClassificationCache: defineTable({
+		userId: v.string(),
+		emailId: v.string(),
+		bucketId: v.string(),
+		confidence: v.number(),
+		reason: v.optional(v.string()),
+		updatedAt: v.number(),
+	}).index("by_user_email", ["userId", "emailId"]),
 	rateLimits: defineTable({
 		key: v.string(),
 		windowStart: v.number(),

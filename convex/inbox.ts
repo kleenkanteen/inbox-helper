@@ -137,6 +137,42 @@ export const getThreadsAndBuckets = query({
 	},
 });
 
+export const getCachedClassifications = query({
+	args: {
+		userId: v.string(),
+		emailIds: v.array(v.string()),
+	},
+	handler: async (ctx, args) => {
+		const uniqueEmailIds = [...new Set(args.emailIds)];
+		const results: Array<{
+			emailId: string;
+			bucketId: string;
+			confidence: number;
+			reason?: string;
+		}> = [];
+
+		for (const emailId of uniqueEmailIds) {
+			const cached = (
+				await ctx.db.query("emailClassificationCache").collect()
+			).find(
+				(entry: { userId: string; emailId: string }) =>
+					entry.userId === args.userId && entry.emailId === emailId,
+			);
+			if (!cached) {
+				continue;
+			}
+			results.push({
+				emailId: cached.emailId,
+				bucketId: cached.bucketId,
+				confidence: cached.confidence,
+				reason: cached.reason,
+			});
+		}
+
+		return results;
+	},
+});
+
 export const saveThreadsAndClassifications = mutation({
 	args: {
 		userId: v.string(),
@@ -231,6 +267,67 @@ export const saveClassifications = mutation({
 				bucketId: classification.bucketId,
 				confidence: classification.confidence,
 				reason: classification.reason,
+				updatedAt: now,
+			});
+		}
+	},
+});
+
+export const upsertCachedClassifications = mutation({
+	args: {
+		userId: v.string(),
+		entries: v.array(
+			v.object({
+				emailId: v.string(),
+				bucketId: v.string(),
+				confidence: v.number(),
+				reason: v.optional(v.string()),
+			}),
+		),
+	},
+	handler: async (ctx, args) => {
+		const now = Date.now();
+		const uniqueEntries = new Map<
+			string,
+			{
+				bucketId: string;
+				confidence: number;
+				reason?: string;
+			}
+		>();
+
+		for (const entry of args.entries) {
+			uniqueEntries.set(entry.emailId, {
+				bucketId: entry.bucketId,
+				confidence: entry.confidence,
+				reason: entry.reason,
+			});
+		}
+
+		for (const [emailId, value] of uniqueEntries.entries()) {
+			const existing = (
+				await ctx.db.query("emailClassificationCache").collect()
+			).find(
+				(entry: { userId: string; emailId: string }) =>
+					entry.userId === args.userId && entry.emailId === emailId,
+			);
+
+			if (existing) {
+				await ctx.db.patch(existing._id, {
+					bucketId: value.bucketId,
+					confidence: value.confidence,
+					reason: value.reason,
+					updatedAt: now,
+				});
+				continue;
+			}
+
+			await ctx.db.insert("emailClassificationCache", {
+				userId: args.userId,
+				emailId,
+				bucketId: value.bucketId,
+				confidence: value.confidence,
+				reason: value.reason,
 				updatedAt: now,
 			});
 		}

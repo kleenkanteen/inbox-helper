@@ -1,10 +1,12 @@
 import { env } from "#/env";
 import type { GoogleOAuthToken, ThreadSummary } from "#/server/inbox/types";
 
-const GMAIL_LIST_THREADS_URL =
-	"https://gmail.googleapis.com/gmail/v1/users/me/threads";
+const GMAIL_LIST_MESSAGES_URL =
+	"https://gmail.googleapis.com/gmail/v1/users/me/messages";
+const GMAIL_GET_MESSAGE_URL =
+	"https://gmail.googleapis.com/gmail/v1/users/me/messages";
 
-const parseThread = (item: unknown): ThreadSummary | null => {
+const parseMessage = (item: unknown): ThreadSummary | null => {
 	if (!item || typeof item !== "object") {
 		return null;
 	}
@@ -22,6 +24,72 @@ const parseThread = (item: unknown): ThreadSummary | null => {
 	};
 };
 
+const extractSubject = (payload: unknown): string | undefined => {
+	if (!payload || typeof payload !== "object") {
+		return undefined;
+	}
+	const value = payload as {
+		payload?: {
+			headers?: Array<{ name?: string; value?: string }>;
+		};
+	};
+	const headers = value.payload?.headers ?? [];
+	const subjectHeader = headers.find(
+		(header) => header.name?.toLowerCase() === "subject",
+	);
+	return subjectHeader?.value?.trim() || undefined;
+};
+
+const fetchMessageSubject = async (
+	token: GoogleOAuthToken,
+	messageId: string,
+): Promise<string | undefined> => {
+	const url = new URL(`${GMAIL_GET_MESSAGE_URL}/${messageId}`);
+	url.searchParams.set("format", "metadata");
+	url.searchParams.set("metadataHeaders", "Subject");
+	url.searchParams.set("fields", "payload(headers(name,value))");
+
+	const response = await fetch(url, {
+		headers: {
+			Authorization: `Bearer ${token.accessToken}`,
+		},
+		cache: "no-store",
+	});
+	if (!response.ok) {
+		return undefined;
+	}
+	return extractSubject(await response.json());
+};
+
+const hydrateSubjects = async (
+	token: GoogleOAuthToken,
+	messages: ThreadSummary[],
+): Promise<ThreadSummary[]> => {
+	const workers = Math.min(12, messages.length);
+	const queue = [...messages];
+	const subjectById = new Map<string, string>();
+
+	await Promise.all(
+		Array.from({ length: workers }, async () => {
+			while (queue.length > 0) {
+				const message = queue.shift();
+				if (!message) {
+					return;
+				}
+				const subject = await fetchMessageSubject(token, message.id);
+				if (subject) {
+					subjectById.set(message.id, subject);
+				}
+			}
+		}),
+	);
+
+	return messages.map((message) => ({
+		...message,
+		subject: subjectById.get(message.id) ?? message.subject,
+	}));
+};
+
 const requiredEnv = (value: string | undefined, key: string): string => {
 	if (!value) {
 		throw new Error(`Missing required env var: ${key}`);
@@ -29,13 +97,13 @@ const requiredEnv = (value: string | undefined, key: string): string => {
 	return value;
 };
 
-export const listRecentThreads = async (
+export const listRecentMessages = async (
 	token: GoogleOAuthToken,
 	limit = 200,
 ): Promise<ThreadSummary[]> => {
-	const url = new URL(GMAIL_LIST_THREADS_URL);
+	const url = new URL(GMAIL_LIST_MESSAGES_URL);
 	url.searchParams.set("maxResults", String(Math.min(500, Math.max(1, limit))));
-	url.searchParams.set("fields", "threads(id,snippet)");
+	url.searchParams.set("fields", "messages(id,snippet)");
 
 	const response = await fetch(url, {
 		headers: {
@@ -45,22 +113,22 @@ export const listRecentThreads = async (
 	});
 
 	if (!response.ok) {
-		throw new Error(`Failed to fetch Gmail threads: ${response.status}`);
+		throw new Error(`Failed to fetch Gmail messages: ${response.status}`);
 	}
 
-	const payload = (await response.json()) as { threads?: unknown[] };
-	const threads = (payload.threads ?? [])
-		.map(parseThread)
+	const payload = (await response.json()) as { messages?: unknown[] };
+	const messages = (payload.messages ?? [])
+		.map(parseMessage)
 		.filter((thread): thread is ThreadSummary => Boolean(thread));
 
-	if (threads.length > 0) {
-		return threads;
+	if (messages.length > 0) {
+		return hydrateSubjects(token, messages);
 	}
 
 	return Array.from({ length: limit }, (_, index) => ({
 		id: `demo-${index + 1}`,
-		subject: `Sample thread ${index + 1}`,
-		snippet: "This is a placeholder thread snippet for development.",
+		subject: `Sample message ${index + 1}`,
+		snippet: "This is a placeholder message snippet for development.",
 	}));
 };
 

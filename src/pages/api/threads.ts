@@ -3,8 +3,8 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { convexMutation, convexQuery } from "#/server/convex/client";
 import { enforceRateLimit } from "#/server/convex/rate-limit";
 import { requireUser } from "#/server/inbox/auth";
-import { classifyThreads } from "#/server/inbox/classifier";
-import { listRecentThreads } from "#/server/inbox/gmail";
+import { classifyUnseenThreads } from "#/server/inbox/classification-cache";
+import { listRecentMessages } from "#/server/inbox/gmail";
 import type { BucketDefinition, GoogleOAuthToken } from "#/server/inbox/types";
 
 export default async function handler(
@@ -16,7 +16,7 @@ export default async function handler(
 		return res.status(405).json({ error: "Method Not Allowed" });
 	}
 
-	const limit = Number(req.query.limit ?? "200");
+	const limit = 200;
 
 	try {
 		const { userId } = await requireUser(req);
@@ -44,8 +44,12 @@ export default async function handler(
 			});
 		}
 
-		const threads = await listRecentThreads(token, limit);
-		const classifications = await classifyThreads(threads, buckets);
+		const threads = await listRecentMessages(token, limit);
+		const classifications = await classifyUnseenThreads({
+			userId,
+			threads,
+			buckets,
+		});
 		await convexMutation("inbox:saveThreadsAndClassifications", {
 			userId,
 			threads,

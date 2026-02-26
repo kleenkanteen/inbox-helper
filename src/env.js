@@ -13,6 +13,8 @@ export const env = createEnv({
 		GOOGLE_CLIENT_ID: optionalInDev(),
 		GOOGLE_CLIENT_SECRET: optionalInDev(),
 		GOOGLE_REDIRECT_URI: optionalInDev(),
+		XAI_API_KEY: optionalInDev(),
+		OPENAI_API_KEY: optionalInDev(),
 		NODE_ENV: z
 			.enum(["development", "test", "production"])
 			.default("development"),
@@ -27,6 +29,8 @@ export const env = createEnv({
 		GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
 		GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
 		GOOGLE_REDIRECT_URI: process.env.GOOGLE_REDIRECT_URI,
+		XAI_API_KEY: process.env.XAI_API_KEY,
+		OPENAI_API_KEY: process.env.OPENAI_API_KEY,
 		NODE_ENV: process.env.NODE_ENV,
 	},
 	skipValidation: !!process.env.SKIP_ENV_VALIDATION,

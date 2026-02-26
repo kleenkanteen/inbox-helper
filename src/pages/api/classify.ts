@@ -3,7 +3,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { convexMutation, convexQuery } from "#/server/convex/client";
 import { enforceRateLimit } from "#/server/convex/rate-limit";
 import { requireUser } from "#/server/inbox/auth";
-import { classifyThreads } from "#/server/inbox/classifier";
+import { classifyUnseenThreads } from "#/server/inbox/classification-cache";
 import type { BucketDefinition, ThreadSummary } from "#/server/inbox/types";
 
 export default async function handler(
@@ -33,10 +33,11 @@ export default async function handler(
 			buckets: BucketDefinition[];
 			threads: ThreadSummary[];
 		};
-		const classifications = await classifyThreads(
-			payload.threads,
-			payload.buckets,
-		);
+		const classifications = await classifyUnseenThreads({
+			userId,
+			threads: payload.threads,
+			buckets: payload.buckets,
+		});
 		await convexMutation("inbox:saveClassifications", {
 			userId,
 			classifications,
