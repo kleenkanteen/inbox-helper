@@ -24,6 +24,14 @@ const parseMessage = (item: unknown): ThreadSummary | null => {
 	};
 };
 
+const parseMessageId = (item: unknown): string | null => {
+	if (!item || typeof item !== "object") {
+		return null;
+	}
+	const value = item as { id?: string };
+	return value.id ?? null;
+};
+
 const extractSubject = (payload: unknown): string | undefined => {
 	if (!payload || typeof payload !== "object") {
 		return undefined;
@@ -130,6 +138,31 @@ export const listRecentMessages = async (
 		subject: `Sample message ${index + 1}`,
 		snippet: "This is a placeholder message snippet for development.",
 	}));
+};
+
+export const listRecentMessageIds = async (
+	token: GoogleOAuthToken,
+	limit = 200,
+): Promise<string[]> => {
+	const url = new URL(GMAIL_LIST_MESSAGES_URL);
+	url.searchParams.set("maxResults", String(Math.min(500, Math.max(1, limit))));
+	url.searchParams.set("fields", "messages(id)");
+
+	const response = await fetch(url, {
+		headers: {
+			Authorization: `Bearer ${token.accessToken}`,
+		},
+		cache: "no-store",
+	});
+
+	if (!response.ok) {
+		throw new Error(`Failed to fetch Gmail message ids: ${response.status}`);
+	}
+
+	const payload = (await response.json()) as { messages?: unknown[] };
+	return (payload.messages ?? [])
+		.map(parseMessageId)
+		.filter((id): id is string => Boolean(id));
 };
 
 export const exchangeCodeForGoogleToken = async (code: string) => {

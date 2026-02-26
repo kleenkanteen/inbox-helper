@@ -23,10 +23,15 @@ export const classifyUnseenThreads = async ({
 	buckets: BucketDefinition[];
 }): Promise<ThreadClassification[]> => {
 	const uniqueEmailIds = [...new Set(threads.map((thread) => thread.id))];
-	const cached = (await convexQuery("inbox:getCachedClassifications", {
-		userId,
-		emailIds: uniqueEmailIds,
-	})) as CachedClassification[];
+	let cached: CachedClassification[] = [];
+	try {
+		cached = (await convexQuery("inbox:getCachedClassifications", {
+			userId,
+			emailIds: uniqueEmailIds,
+		})) as CachedClassification[];
+	} catch {
+		cached = [];
+	}
 
 	const validBucketIds = new Set(buckets.map((bucket) => bucket.id));
 	const cacheByEmailId = new Map(
@@ -65,10 +70,14 @@ export const classifyUnseenThreads = async ({
 		}));
 
 		if (entries.length > 0) {
-			await convexMutation("inbox:upsertCachedClassifications", {
-				userId,
-				entries,
-			});
+			try {
+				await convexMutation("inbox:upsertCachedClassifications", {
+					userId,
+					entries,
+				});
+			} catch {
+				// Cache failures should not block serving classified inbox results.
+			}
 		}
 	}
 
@@ -82,7 +91,17 @@ export const classifyUnseenThreads = async ({
 	return threads.map((thread) => {
 		const classification = classificationByThreadId.get(thread.id);
 		if (!classification) {
-			throw new Error(`Missing classification for thread ${thread.id}`);
+			const fallbackBucketId = buckets.find((bucket) => bucket.name === "Can Wait")
+				?.id ?? buckets[0]?.id;
+			if (!fallbackBucketId) {
+				throw new Error(`Missing classification for thread ${thread.id}`);
+			}
+			return {
+				threadId: thread.id,
+				bucketId: fallbackBucketId,
+				confidence: 0.1,
+				reason: "Fallback assignment due to missing classification.",
+			};
 		}
 		return classification;
 	});

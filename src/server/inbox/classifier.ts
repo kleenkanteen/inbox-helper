@@ -14,6 +14,7 @@ const XAI_MODEL_ID = "grok-4-1-fast-non-reasoning";
 const OPENAI_MODEL_ID = "gpt-4o-mini";
 const MAX_THREADS = 200;
 const PREVIEW_LIMIT = 300;
+const MODEL_TIMEOUT_MS = 8000;
 
 const truncatePreview = (value: string) => value.slice(0, PREVIEW_LIMIT);
 
@@ -85,6 +86,27 @@ const classifyWithModel = async ({
 	});
 };
 
+const withTimeout = async <T>(
+	promise: Promise<T>,
+	ms: number,
+	label: string,
+): Promise<T> => {
+	let timeoutId: ReturnType<typeof setTimeout> | null = null;
+	const timeoutPromise = new Promise<T>((_, reject) => {
+		timeoutId = setTimeout(() => {
+			reject(new Error(`${label} timed out after ${ms}ms`));
+		}, ms);
+	});
+
+	try {
+		return await Promise.race([promise, timeoutPromise]);
+	} finally {
+		if (timeoutId) {
+			clearTimeout(timeoutId);
+		}
+	}
+};
+
 export const classifyThreads = async (
 	threads: ThreadSummary[],
 	buckets: BucketDefinition[],
@@ -99,17 +121,26 @@ export const classifyThreads = async (
 	}));
 
 	const errors: string[] = [];
+	const fallbackBucket =
+		buckets.find((bucket) => bucket.name === "Can Wait") ?? buckets[0];
+	if (!fallbackBucket) {
+		throw new Error("At least one bucket is required for fallback");
+	}
 
 	try {
 		if (!env.XAI_API_KEY) {
 			throw new Error("Missing XAI_API_KEY");
 		}
 		const xai = createXai({ apiKey: env.XAI_API_KEY });
-		return await classifyWithModel({
-			model: xai(XAI_MODEL_ID),
-			threads: limited,
-			buckets,
-		});
+		return await withTimeout(
+			classifyWithModel({
+				model: xai(XAI_MODEL_ID),
+				threads: limited,
+				buckets,
+			}),
+			MODEL_TIMEOUT_MS,
+			"xAI classification",
+		);
 	} catch (error) {
 		errors.push(`xAI failed: ${(error as Error).message}`);
 	}
@@ -119,14 +150,25 @@ export const classifyThreads = async (
 			throw new Error("Missing OPENAI_API_KEY");
 		}
 		const openai = createOpenAI({ apiKey: env.OPENAI_API_KEY });
-		return await classifyWithModel({
-			model: openai(OPENAI_MODEL_ID),
-			threads: limited,
-			buckets,
-		});
+		return await withTimeout(
+			classifyWithModel({
+				model: openai(OPENAI_MODEL_ID),
+				threads: limited,
+				buckets,
+			}),
+			MODEL_TIMEOUT_MS,
+			"OpenAI classification",
+		);
 	} catch (error) {
 		errors.push(`OpenAI failed: ${(error as Error).message}`);
 	}
 
-	throw new Error(`LLM classification failed. ${errors.join(" | ")}`);
+	// Graceful degradation when model providers are unavailable:
+	// assign every thread to a stable fallback bucket instead of failing the request.
+	return limited.map((thread) => ({
+		threadId: thread.id,
+		bucketId: fallbackBucket.id,
+		confidence: 0.2,
+		reason: `Fallback classification. ${errors.join(" | ")}`.slice(0, 240),
+	}));
 };

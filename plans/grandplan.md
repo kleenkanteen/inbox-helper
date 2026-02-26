@@ -45,6 +45,14 @@ Build a React-based web interface where users:
 5. User can create one or more custom buckets.
 6. On bucket changes, all 200 threads are reclassified.
 7. Classification must complete with graceful fallback if LLM fails.
+8. Header includes `Refresh`, `Recategorize`, and `Logout` actions.
+9. If Gmail messages cannot be fetched due missing/expired authorization, show a `Sign in` button to the left of `Refresh`.
+10. Logout must sign out app session and clear stored Gmail OAuth token.
+11. Categories render in a left pane; right pane renders only the selected category.
+12. `Important` is selected by default on load (categories are not all expanded).
+13. System checks for new messages every 10 seconds and on manual refresh by comparing Gmail message IDs from the latest 200 messages.
+14. If new messages are detected, show the spinner badge at the top.
+15. Last left-pane option is `Configure categories`; submitting name/description creates the category and immediately triggers recategorization.
 
 ## 4) High-Level Architecture
 
@@ -128,16 +136,21 @@ When user adds/edits buckets:
 
 ### Main Screen
 
-- Header: account identity + refresh button.
-- Bucket tabs/columns with counts.
+- Header: app title + `Refresh`, `Recategorize`, `Logout`.
+- Conditional header action: show `Sign in` left of `Refresh` when Gmail authorization is missing/expired.
+- Optional top update indicator: spinner badge when newer messages are available.
+- Two-pane layout:
+  - Left pane: `Categories` list with Lucide icons and per-category counts.
+  - Right pane: selected category thread list.
 - Thread row: subject (primary), snippet (secondary), confidence badge (optional).
 
 ### Bucket Management
 
-- Modal/panel to create custom bucket:
+- `Configure categories` action appears as the last item in the left pane.
+- Configure form includes:
   - Bucket name
   - Short rule/description (optional guidance for classifier prompt)
-- Save action triggers recategorization job.
+- Save action creates the category and triggers immediate recategorization.
 - Show non-blocking progress/loading state.
 
 ### Errors and Empty States
@@ -145,6 +158,11 @@ When user adds/edits buckets:
 - Auth denied -> actionable reconnect CTA.
 - Gmail fetch failed -> retry CTA.
 - LLM partial failure -> show fallback classifications + warning toast.
+
+### Implemented Fallback Rule (Current)
+
+- If xAI and OpenAI classification both fail (for example missing API keys, provider errors, or schema failures), the backend assigns all threads to `Can Wait` (or first available bucket when `Can Wait` is unavailable) with low confidence instead of returning 500.
+- Provider calls use bounded timeouts; if a model call stalls, it is treated as failed and the same fallback classification is applied.
 
 ## 7) Milestones (Parallel-Executable Workstreams)
 

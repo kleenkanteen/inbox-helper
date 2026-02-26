@@ -11,13 +11,19 @@ const schema = z.object({
 	name: z.string().min(2).max(60),
 	description: z.string().max(240).optional(),
 });
+const updateSchema = schema.extend({
+	id: z.string().min(1),
+});
+const deleteSchema = z.object({
+	id: z.string().min(1),
+});
 
 export default async function handler(
 	req: NextApiRequest,
 	res: NextApiResponse,
 ) {
-	if (req.method !== "POST") {
-		res.setHeader("Allow", "POST");
+	if (!["POST", "PUT", "DELETE"].includes(req.method ?? "")) {
+		res.setHeader("Allow", "POST, PUT, DELETE");
 		return res.status(405).json({ error: "Method Not Allowed" });
 	}
 
@@ -33,12 +39,32 @@ export default async function handler(
 			return res.status(429).json({ error: "Rate limit exceeded" });
 		}
 
-		const payload = schema.parse(req.body);
-		await convexMutation("inbox:addBucket", {
-			userId,
-			name: payload.name,
-			description: payload.description,
-		});
+		if (req.method === "POST") {
+			const payload = schema.parse(req.body);
+			await convexMutation("inbox:addBucket", {
+				userId,
+				name: payload.name,
+				description: payload.description,
+			});
+		}
+
+		if (req.method === "PUT") {
+			const payload = updateSchema.parse(req.body);
+			await convexMutation("inbox:updateBucket", {
+				userId,
+				bucketId: payload.id,
+				name: payload.name,
+				description: payload.description,
+			});
+		}
+
+		if (req.method === "DELETE") {
+			const payload = deleteSchema.parse(req.body);
+			await convexMutation("inbox:deleteBucket", {
+				userId,
+				bucketId: payload.id,
+			});
+		}
 
 		const data = (await convexQuery("inbox:getThreadsAndBuckets", {
 			userId,

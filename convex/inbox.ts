@@ -81,14 +81,26 @@ export const saveGoogleToken = mutation({
 		const now = Date.now();
 		if (existing) {
 			await ctx.db.patch(existing._id, {
-				...args.token,
+				accessToken: args.token.accessToken,
+				...(args.token.refreshToken
+					? { refreshToken: args.token.refreshToken }
+					: {}),
+				...(args.token.expiresAt ? { expiresAt: args.token.expiresAt } : {}),
+				...(args.token.scope ? { scope: args.token.scope } : {}),
+				...(args.token.tokenType ? { tokenType: args.token.tokenType } : {}),
 				updatedAt: now,
 			});
 			return existing._id;
 		}
 		return ctx.db.insert("oauthTokens", {
 			userId: args.userId,
-			...args.token,
+			accessToken: args.token.accessToken,
+			...(args.token.refreshToken
+				? { refreshToken: args.token.refreshToken }
+				: {}),
+			...(args.token.expiresAt ? { expiresAt: args.token.expiresAt } : {}),
+			...(args.token.scope ? { scope: args.token.scope } : {}),
+			...(args.token.tokenType ? { tokenType: args.token.tokenType } : {}),
 			updatedAt: now,
 		});
 	},
@@ -110,6 +122,20 @@ export const getGoogleToken = query({
 			scope: token.scope,
 			tokenType: token.tokenType,
 		};
+	},
+});
+
+export const deleteGoogleToken = mutation({
+	args: { userId: v.string() },
+	handler: async (ctx, args) => {
+		const token = (await ctx.db.query("oauthTokens").collect()).find(
+			(entry: { userId: string }) => entry.userId === args.userId,
+		);
+		if (!token) {
+			return null;
+		}
+		await ctx.db.delete(token._id);
+		return token._id;
 	},
 });
 
@@ -208,7 +234,7 @@ export const saveThreadsAndClassifications = mutation({
 				threadId: thread.id,
 				subject: thread.subject,
 				snippet: thread.snippet,
-				sender: thread.sender,
+				...(thread.sender ? { sender: thread.sender } : {}),
 				updatedAt: now,
 			});
 		}
@@ -229,7 +255,7 @@ export const saveThreadsAndClassifications = mutation({
 				threadId: classification.threadId,
 				bucketId: classification.bucketId,
 				confidence: classification.confidence,
-				reason: classification.reason,
+				...(classification.reason ? { reason: classification.reason } : {}),
 				updatedAt: now,
 			});
 		}
@@ -266,7 +292,7 @@ export const saveClassifications = mutation({
 				threadId: classification.threadId,
 				bucketId: classification.bucketId,
 				confidence: classification.confidence,
-				reason: classification.reason,
+				...(classification.reason ? { reason: classification.reason } : {}),
 				updatedAt: now,
 			});
 		}
@@ -316,7 +342,7 @@ export const upsertCachedClassifications = mutation({
 				await ctx.db.patch(existing._id, {
 					bucketId: value.bucketId,
 					confidence: value.confidence,
-					reason: value.reason,
+					...(value.reason ? { reason: value.reason } : {}),
 					updatedAt: now,
 				});
 				continue;
@@ -327,7 +353,7 @@ export const upsertCachedClassifications = mutation({
 				emailId,
 				bucketId: value.bucketId,
 				confidence: value.confidence,
-				reason: value.reason,
+				...(value.reason ? { reason: value.reason } : {}),
 				updatedAt: now,
 			});
 		}
@@ -346,9 +372,53 @@ export const addBucket = mutation({
 			userId: args.userId,
 			name: args.name,
 			type: "custom",
-			description: args.description,
+			...(args.description ? { description: args.description } : {}),
 			createdAt: Date.now(),
 		});
+	},
+});
+
+export const updateBucket = mutation({
+	args: {
+		userId: v.string(),
+		bucketId: v.string(),
+		name: v.string(),
+		description: v.optional(v.string()),
+	},
+	handler: async (ctx, args) => {
+		await ensureDefaults(ctx, args.userId);
+		const bucket = await ctx.db.get(args.bucketId as any);
+		if (!bucket || bucket.userId !== args.userId) {
+			throw new Error("Bucket not found");
+		}
+
+		await ctx.db.patch(bucket._id, {
+			name: args.name,
+			description: args.description,
+		});
+	},
+});
+
+export const deleteBucket = mutation({
+	args: {
+		userId: v.string(),
+		bucketId: v.string(),
+	},
+	handler: async (ctx, args) => {
+		await ensureDefaults(ctx, args.userId);
+		const bucket = await ctx.db.get(args.bucketId as any);
+		if (!bucket || bucket.userId !== args.userId) {
+			throw new Error("Bucket not found");
+		}
+
+		const allBuckets = (await ctx.db.query("bucketDefinitions").collect()).filter(
+			(entry: { userId: string }) => entry.userId === args.userId,
+		);
+		if (allBuckets.length <= 1) {
+			throw new Error("Cannot delete the last category");
+		}
+
+		await ctx.db.delete(bucket._id);
 	},
 });
 
