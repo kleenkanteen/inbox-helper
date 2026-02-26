@@ -4,7 +4,7 @@ import { z } from "zod";
 import { convexMutation, convexQuery } from "#/server/convex/client";
 import { enforceRateLimit } from "#/server/convex/rate-limit";
 import { requireUser } from "#/server/inbox/auth";
-import { classifyUnseenThreads } from "#/server/inbox/classification-cache";
+import { classifyAllThreads } from "#/server/inbox/classification-cache";
 import type { BucketDefinition, ThreadSummary } from "#/server/inbox/types";
 
 const schema = z.object({
@@ -72,7 +72,7 @@ export default async function handler(
 			buckets: BucketDefinition[];
 			threads: ThreadSummary[];
 		};
-		const classifications = await classifyUnseenThreads({
+		const classifications = await classifyAllThreads({
 			userId,
 			threads: data.threads,
 			buckets: data.buckets,

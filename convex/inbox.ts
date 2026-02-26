@@ -157,6 +157,7 @@ export const getThreadsAndBuckets = query({
 				id: thread.threadId,
 				subject: thread.subject,
 				snippet: thread.snippet,
+				receivedAt: thread.receivedAt,
 				sender: thread.sender,
 			})),
 		};
@@ -207,6 +208,7 @@ export const saveThreadsAndClassifications = mutation({
 				id: v.string(),
 				subject: v.string(),
 				snippet: v.string(),
+				receivedAt: v.optional(v.number()),
 				sender: v.optional(v.string()),
 			}),
 		),
@@ -234,6 +236,9 @@ export const saveThreadsAndClassifications = mutation({
 				threadId: thread.id,
 				subject: thread.subject,
 				snippet: thread.snippet,
+				...(typeof thread.receivedAt === "number"
+					? { receivedAt: thread.receivedAt }
+					: {}),
 				...(thread.sender ? { sender: thread.sender } : {}),
 				updatedAt: now,
 			});
@@ -452,6 +457,7 @@ export const getInbox = query({
 					id: string;
 					subject: string;
 					snippet: string;
+					receivedAt?: number;
 					confidence: number;
 				}>;
 			}
@@ -480,6 +486,7 @@ export const getInbox = query({
 				id: thread.threadId,
 				subject: thread.subject,
 				snippet: thread.snippet,
+				receivedAt: thread.receivedAt,
 				confidence: classification.confidence,
 			});
 		}

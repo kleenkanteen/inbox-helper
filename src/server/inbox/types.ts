@@ -17,6 +17,7 @@ export type ThreadSummary = {
 	id: string;
 	subject: string;
 	snippet: string;
+	receivedAt?: number;
 	sender?: string;
 };
 

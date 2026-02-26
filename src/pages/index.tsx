@@ -25,6 +25,7 @@ type BucketedThread = {
 	id: string;
 	subject: string;
 	snippet: string;
+	receivedAt?: number;
 	confidence: number;
 };
 
@@ -82,6 +83,17 @@ const bucketIcon = (bucket: BucketDefinition) => {
 		return Newspaper;
 	}
 	return Tag;
+};
+
+const formatThreadDate = (receivedAt?: number) => {
+	if (!receivedAt || !Number.isFinite(receivedAt)) {
+		return "";
+	}
+
+	return new Intl.DateTimeFormat("en-US", {
+		month: "short",
+		day: "numeric",
+	}).format(new Date(receivedAt));
 };
 
 export default function Home() {
@@ -677,10 +689,24 @@ export default function Home() {
 													className="border-b pb-2 last:border-b-0"
 													key={thread.id}
 												>
-													<p className="truncate font-medium text-sm">
-														{thread.subject}
-													</p>
-													<p className="max-h-10 overflow-hidden text-slate-600 text-sm leading-5">
+													<div className="flex items-start justify-between gap-2">
+														<p className="truncate font-medium text-sm">
+															{thread.subject}
+														</p>
+														{typeof thread.receivedAt === "number" ? (
+															<p className="shrink-0 text-slate-500 text-xs">
+																{formatThreadDate(thread.receivedAt)}
+															</p>
+														) : null}
+													</div>
+													<p
+														className="mt-1 overflow-hidden text-slate-500 text-sm leading-5"
+														style={{
+															display: "-webkit-box",
+															WebkitBoxOrient: "vertical",
+															WebkitLineClamp: 2,
+														}}
+													>
 														{thread.snippet}
 													</p>
 												</li>

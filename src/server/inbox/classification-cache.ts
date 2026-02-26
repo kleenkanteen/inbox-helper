@@ -13,6 +13,34 @@ type CachedClassification = {
 	reason?: string;
 };
 
+const upsertCachedClassifications = async ({
+	userId,
+	classifications,
+}: {
+	userId: string;
+	classifications: ThreadClassification[];
+}) => {
+	const entries = classifications.map((classification) => ({
+		emailId: classification.threadId,
+		bucketId: classification.bucketId,
+		confidence: classification.confidence,
+		reason: classification.reason,
+	}));
+
+	if (entries.length === 0) {
+		return;
+	}
+
+	try {
+		await convexMutation("inbox:upsertCachedClassifications", {
+			userId,
+			entries,
+		});
+	} catch {
+		// Cache failures should not block serving classified inbox results.
+	}
+};
+
 export const classifyUnseenThreads = async ({
 	userId,
 	threads,
@@ -61,25 +89,7 @@ export const classifyUnseenThreads = async ({
 		? await classifyThreads(unseen, buckets)
 		: [];
 
-	if (newlyClassified.length > 0) {
-		const entries = newlyClassified.map((classification) => ({
-			emailId: classification.threadId,
-			bucketId: classification.bucketId,
-			confidence: classification.confidence,
-			reason: classification.reason,
-		}));
-
-		if (entries.length > 0) {
-			try {
-				await convexMutation("inbox:upsertCachedClassifications", {
-					userId,
-					entries,
-				});
-			} catch {
-				// Cache failures should not block serving classified inbox results.
-			}
-		}
-	}
+	await upsertCachedClassifications({ userId, classifications: newlyClassified });
 
 	const classificationByThreadId = new Map(
 		[...seen, ...newlyClassified].map((classification) => [
@@ -105,4 +115,21 @@ export const classifyUnseenThreads = async ({
 		}
 		return classification;
 	});
+};
+
+export const classifyAllThreads = async ({
+	userId,
+	threads,
+	buckets,
+}: {
+	userId: string;
+	threads: ThreadSummary[];
+	buckets: BucketDefinition[];
+}): Promise<ThreadClassification[]> => {
+	const classifications = threads.length
+		? await classifyThreads(threads, buckets)
+		: [];
+
+	await upsertCachedClassifications({ userId, classifications });
+	return classifications;
 };

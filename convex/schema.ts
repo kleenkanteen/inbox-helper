@@ -23,6 +23,7 @@ export default defineSchema({
 		threadId: v.string(),
 		subject: v.string(),
 		snippet: v.string(),
+		receivedAt: v.optional(v.number()),
 		sender: v.optional(v.string()),
 		updatedAt: v.number(),
 	}).index("by_user_thread", ["userId", "threadId"]),

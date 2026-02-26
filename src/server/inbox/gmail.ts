@@ -5,6 +5,7 @@ const GMAIL_LIST_MESSAGES_URL =
 	"https://gmail.googleapis.com/gmail/v1/users/me/messages";
 const GMAIL_GET_MESSAGE_URL =
 	"https://gmail.googleapis.com/gmail/v1/users/me/messages";
+const BODY_PREVIEW_LIMIT = 200;
 
 const parseMessage = (item: unknown): ThreadSummary | null => {
 	if (!item || typeof item !== "object") {
@@ -13,14 +14,17 @@ const parseMessage = (item: unknown): ThreadSummary | null => {
 	const value = item as {
 		id?: string;
 		snippet?: string;
+		internalDate?: string;
 	};
 	if (!value.id) {
 		return null;
 	}
+	const receivedAt = value.internalDate ? Number(value.internalDate) : undefined;
 	return {
 		id: value.id,
 		subject: "(No Subject)",
 		snippet: value.snippet ?? "",
+		...(Number.isFinite(receivedAt) ? { receivedAt } : {}),
 	};
 };
 
@@ -48,14 +52,105 @@ const extractSubject = (payload: unknown): string | undefined => {
 	return subjectHeader?.value?.trim() || undefined;
 };
 
-const fetchMessageSubject = async (
+const extractInternalDate = (payload: unknown): number | undefined => {
+	if (!payload || typeof payload !== "object") {
+		return undefined;
+	}
+	const value = payload as { internalDate?: string };
+	if (!value.internalDate) {
+		return undefined;
+	}
+	const timestamp = Number(value.internalDate);
+	return Number.isFinite(timestamp) ? timestamp : undefined;
+};
+
+const decodeBase64Url = (value: string): string => {
+	try {
+		const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+		const padding = normalized.length % 4;
+		const padded =
+			padding === 0 ? normalized : normalized.padEnd(normalized.length + (4 - padding), "=");
+		return Buffer.from(padded, "base64").toString("utf8");
+	} catch {
+		return "";
+	}
+};
+
+const normalizeWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
+
+const stripHtml = (value: string): string => {
+	const noScripts = value
+		.replace(/<script[\s\S]*?<\/script>/gi, " ")
+		.replace(/<style[\s\S]*?<\/style>/gi, " ");
+	return noScripts.replace(/<[^>]+>/g, " ");
+};
+
+type GmailBodyPart = {
+	mimeType?: string;
+	body?: { data?: string };
+	parts?: GmailBodyPart[];
+};
+
+const collectBodyText = (
+	part: GmailBodyPart | undefined,
+	plainText: string[],
+	htmlText: string[],
+) => {
+	if (!part) {
+		return;
+	}
+
+	const decoded = part.body?.data
+		? normalizeWhitespace(decodeBase64Url(part.body.data))
+		: "";
+	if (decoded) {
+		if (part.mimeType?.startsWith("text/plain")) {
+			plainText.push(decoded);
+		} else if (part.mimeType?.startsWith("text/html")) {
+			htmlText.push(normalizeWhitespace(stripHtml(decoded)));
+		} else if (!part.parts || part.parts.length === 0) {
+			plainText.push(decoded);
+		}
+	}
+
+	for (const child of part.parts ?? []) {
+		collectBodyText(child, plainText, htmlText);
+	}
+};
+
+const extractBodyPreview = (payload: unknown): string | undefined => {
+	if (!payload || typeof payload !== "object") {
+		return undefined;
+	}
+	const value = payload as { payload?: GmailBodyPart };
+	const root = value.payload;
+	if (!root) {
+		return undefined;
+	}
+
+	const plainText: string[] = [];
+	const htmlText: string[] = [];
+	collectBodyText(root, plainText, htmlText);
+
+	const combinedPlain = normalizeWhitespace(plainText.join(" "));
+	if (combinedPlain) {
+		return combinedPlain.slice(0, BODY_PREVIEW_LIMIT);
+	}
+
+	const combinedHtml = normalizeWhitespace(htmlText.join(" "));
+	if (combinedHtml) {
+		return combinedHtml.slice(0, BODY_PREVIEW_LIMIT);
+	}
+
+	return undefined;
+};
+
+const fetchMessageDetails = async (
 	token: GoogleOAuthToken,
 	messageId: string,
-): Promise<string | undefined> => {
+): Promise<{ subject?: string; bodyPreview?: string; receivedAt?: number }> => {
 	const url = new URL(`${GMAIL_GET_MESSAGE_URL}/${messageId}`);
-	url.searchParams.set("format", "metadata");
-	url.searchParams.set("metadataHeaders", "Subject");
-	url.searchParams.set("fields", "payload(headers(name,value))");
+	url.searchParams.set("format", "full");
 
 	const response = await fetch(url, {
 		headers: {
@@ -64,18 +159,25 @@ const fetchMessageSubject = async (
 		cache: "no-store",
 	});
 	if (!response.ok) {
-		return undefined;
+		return {};
 	}
-	return extractSubject(await response.json());
+	const payload = await response.json();
+	return {
+		subject: extractSubject(payload),
+		bodyPreview: extractBodyPreview(payload),
+		receivedAt: extractInternalDate(payload),
+	};
 };
 
-const hydrateSubjects = async (
+const hydrateMessageDetails = async (
 	token: GoogleOAuthToken,
 	messages: ThreadSummary[],
 ): Promise<ThreadSummary[]> => {
 	const workers = Math.min(12, messages.length);
 	const queue = [...messages];
 	const subjectById = new Map<string, string>();
+	const bodyPreviewById = new Map<string, string>();
+	const receivedAtById = new Map<string, number>();
 
 	await Promise.all(
 		Array.from({ length: workers }, async () => {
@@ -84,9 +186,15 @@ const hydrateSubjects = async (
 				if (!message) {
 					return;
 				}
-				const subject = await fetchMessageSubject(token, message.id);
-				if (subject) {
-					subjectById.set(message.id, subject);
+				const details = await fetchMessageDetails(token, message.id);
+				if (details.subject) {
+					subjectById.set(message.id, details.subject);
+				}
+				if (details.bodyPreview) {
+					bodyPreviewById.set(message.id, details.bodyPreview);
+				}
+				if (typeof details.receivedAt === "number") {
+					receivedAtById.set(message.id, details.receivedAt);
 				}
 			}
 		}),
@@ -95,6 +203,8 @@ const hydrateSubjects = async (
 	return messages.map((message) => ({
 		...message,
 		subject: subjectById.get(message.id) ?? message.subject,
+		snippet: bodyPreviewById.get(message.id) ?? message.snippet,
+		receivedAt: receivedAtById.get(message.id) ?? message.receivedAt,
 	}));
 };
 
@@ -111,7 +221,7 @@ export const listRecentMessages = async (
 ): Promise<ThreadSummary[]> => {
 	const url = new URL(GMAIL_LIST_MESSAGES_URL);
 	url.searchParams.set("maxResults", String(Math.min(500, Math.max(1, limit))));
-	url.searchParams.set("fields", "messages(id,snippet)");
+	url.searchParams.set("fields", "messages(id,snippet,internalDate)");
 
 	const response = await fetch(url, {
 		headers: {
@@ -130,7 +240,7 @@ export const listRecentMessages = async (
 		.filter((thread): thread is ThreadSummary => Boolean(thread));
 
 	if (messages.length > 0) {
-		return hydrateSubjects(token, messages);
+		return hydrateMessageDetails(token, messages);
 	}
 
 	return Array.from({ length: limit }, (_, index) => ({
