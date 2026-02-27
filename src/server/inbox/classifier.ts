@@ -14,7 +14,7 @@ const OPENAI_MODEL_ID = "gpt-4o-mini";
 const MAX_THREADS = 200;
 const PREVIEW_LIMIT = 300;
 const MODEL_TIMEOUT_MS = 45000;
-const MAX_CONCURRENT_CLASSIFICATIONS = 12;
+const MAX_CONCURRENT_CLASSIFICATIONS = 200;
 const CHAT_SEARCH_TIMEOUT_MS = 20000;
 
 const getEnv = (key: string) => {
