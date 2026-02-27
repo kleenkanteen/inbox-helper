@@ -1,10 +1,14 @@
 import { httpRouter } from "convex/server";
 import { z } from "zod";
 import { auth } from "../src/server/better-auth";
-import { classifyThreads } from "../src/server/inbox/classifier";
+import {
+	classifyThreads,
+	searchRelevantThreads,
+} from "../src/server/inbox/classifier";
 import {
 	buildGoogleConsentUrl,
 	exchangeCodeForGoogleToken,
+	fetchMessageDetail,
 	listRecentMessageIds,
 	listRecentMessages,
 } from "../src/server/inbox/gmail";
@@ -33,6 +37,15 @@ const deleteBucketSchema = z.object({
 
 const checkNewSchema = z.object({
 	knownIds: z.array(z.string()).max(200),
+});
+
+const chatSearchSchema = z.object({
+	query: z.string().trim().min(2).max(500),
+	limit: z.number().int().min(1).max(50).optional(),
+});
+
+const messageDetailSchema = z.object({
+	id: z.string().trim().min(1),
 });
 
 const jsonHeaders = {
@@ -248,6 +261,18 @@ const classifyUnseenThreads = async ({
 	});
 };
 
+const compareThreadRecency = (
+	left: { id: string; receivedAt?: number },
+	right: { id: string; receivedAt?: number },
+) => {
+	const leftTime = typeof left.receivedAt === "number" ? left.receivedAt : 0;
+	const rightTime = typeof right.receivedAt === "number" ? right.receivedAt : 0;
+	if (leftTime !== rightTime) {
+		return rightTime - leftTime;
+	}
+	return left.id.localeCompare(right.id);
+};
+
 const getHandler = httpAction(async (ctx, request) => {
 	const url = new URL(request.url);
 
@@ -255,14 +280,14 @@ const getHandler = httpAction(async (ctx, request) => {
 		const limit = 200;
 		try {
 			console.log("[/api/threads] STEP 1: start request handling");
-			const { userId } = await getUserFromRequest(request);	
+			const { userId } = await getUserFromRequest(request);
 			console.log("[/api/threads] STEP 2: resolved user", { userId });
-			const rateLimit = await enforceRateLimit(ctx, {	
+			const rateLimit = await enforceRateLimit(ctx, {
 				route: "threads_get",
 				userId,
 				limit: 30,
 				windowMs: 60_000,
-				});
+			});
 			console.log("[/api/threads] STEP 3: rate limit checked", {
 				allowed: rateLimit.allowed,
 			});
@@ -274,29 +299,29 @@ const getHandler = httpAction(async (ctx, request) => {
 			}
 
 			const buckets = (await ctx.runMutation(api.inbox.ensureDefaultBuckets, {
-					userId,
+				userId,
 			})) as BucketDefinition[];
 			console.log("[/api/threads] STEP 4: ensured buckets", {
 				bucketCount: buckets.length,
 			});
-			const token = (await ctx.runQuery(api.inbox.getGoogleToken,	 {
+			const token = (await ctx.runQuery(api.inbox.getGoogleToken, {
 				userId,
 			})) as GoogleOAuthToken | null;
 			console.log("[/api/threads] STEP 5: fetched Google token", {
 				hasToken: Boolean(token),
 			});
 
-				if (!token) {
-					return new Response(
-						JSON.stringify({
-							error: "Google account is not connected",
-							needsGoogleAuth: true,
-						}),
-						{
-							status: 400,
-							headers: jsonHeaders,
-						},
-					);
+			if (!token) {
+				return new Response(
+					JSON.stringify({
+						error: "Google account is not connected",
+						needsGoogleAuth: true,
+					}),
+					{
+						status: 400,
+						headers: jsonHeaders,
+					},
+				);
 			}
 
 			let threads: ThreadSummary[];
@@ -317,7 +342,7 @@ const getHandler = httpAction(async (ctx, request) => {
 				});
 				if (
 					message.includes("Failed to fetch Gmail messages: 401") ||
-					message.includes("Failed to fetch Gmail messages: 403")	
+					message.includes("Failed to fetch Gmail messages: 403")
 				) {
 					return new Response(
 						JSON.stringify({
@@ -370,18 +395,18 @@ const getHandler = httpAction(async (ctx, request) => {
 			});
 		}
 	}
-	
+
 	if (url.pathname === "/api/auth/google/callback") {
 		const code = url.searchParams.get("code");
 		const state = parseOAuthState(url.searchParams.get("state"));
 
 		if (!code) {
-			return redirect(buildAppRedirect(request, "/?error=missing_code", state));	
+			return redirect(buildAppRedirect(request, "/?error=missing_code", state));
 		}
 
-		try 	{
+		try {
 			const { userId: sessionUserId } = await getUserFromRequest(request);
-			const userId	 =
+			const userId =
 				sessionUserId === "local-user"
 					? (state.userId ?? "local-user")
 					: sessionUserId;
@@ -467,6 +492,155 @@ const postHandler = httpAction(async (ctx, request) => {
 		} catch {
 			return new Response(JSON.stringify({ error: "Unauthorized" }), {
 				status: 401,
+				headers: jsonHeaders,
+			});
+		}
+	}
+
+	if (url.pathname === "/api/chat/search") {
+		try {
+			const { userId } = await getUserFromRequest(request);
+			const rateLimit = await enforceRateLimit(ctx, {
+				route: "chat_search_post",
+				userId,
+				limit: 30,
+				windowMs: 60_000,
+			});
+			if (!rateLimit.allowed) {
+				return new Response(JSON.stringify({ error: "Rate limit exceeded" }), {
+					status: 429,
+					headers: jsonHeaders,
+				});
+			}
+
+			const body = (await request.json()) as unknown;
+			const payload = chatSearchSchema.parse(body);
+
+			const stored = (await ctx.runQuery(api.inbox.getThreadsAndBuckets, {
+				userId,
+			})) as {
+				threads: ThreadSummary[];
+			};
+
+			const threads = [...stored.threads]
+				.sort(compareThreadRecency)
+				.slice(0, 200);
+			const matchedIds = await searchRelevantThreads({
+				query: payload.query,
+				threads,
+				limit: payload.limit ?? 15,
+			});
+			const threadById = new Map(threads.map((thread) => [thread.id, thread]));
+			const results = matchedIds
+				.map((id) => threadById.get(id))
+				.filter((thread): thread is ThreadSummary => Boolean(thread))
+				.map((thread) => ({
+					id: thread.id,
+					subject: thread.subject,
+					snippet: thread.snippet,
+					sender: thread.sender,
+					receivedAt: thread.receivedAt,
+				}));
+
+			return new Response(
+				JSON.stringify({
+					query: payload.query,
+					totalCandidates: threads.length,
+					results,
+				}),
+				{
+					status: 200,
+					headers: jsonHeaders,
+				},
+			);
+		} catch (error) {
+			if (error instanceof z.ZodError) {
+				return new Response(JSON.stringify({ error: error.flatten() }), {
+					status: 400,
+					headers: jsonHeaders,
+				});
+			}
+			const message =
+				error instanceof Error ? error.message : "Failed to search chat";
+			return new Response(JSON.stringify({ error: message }), {
+				status: 500,
+				headers: jsonHeaders,
+			});
+		}
+	}
+
+	if (url.pathname === "/api/messages/detail") {
+		try {
+			const { userId } = await getUserFromRequest(request);
+			const rateLimit = await enforceRateLimit(ctx, {
+				route: "message_detail_post",
+				userId,
+				limit: 60,
+				windowMs: 60_000,
+			});
+			if (!rateLimit.allowed) {
+				return new Response(JSON.stringify({ error: "Rate limit exceeded" }), {
+					status: 429,
+					headers: jsonHeaders,
+				});
+			}
+
+			const body = (await request.json()) as unknown;
+			const payload = messageDetailSchema.parse(body);
+			const token = (await ctx.runQuery(api.inbox.getGoogleToken, {
+				userId,
+			})) as GoogleOAuthToken | null;
+
+			if (!token) {
+				return new Response(
+					JSON.stringify({
+						error: "Google account is not connected",
+						needsGoogleAuth: true,
+					}),
+					{
+						status: 400,
+						headers: jsonHeaders,
+					},
+				);
+			}
+
+			const detail = await fetchMessageDetail({
+				token,
+				messageId: payload.id,
+			});
+
+			return new Response(JSON.stringify(detail), {
+				status: 200,
+				headers: jsonHeaders,
+			});
+		} catch (error) {
+			if (error instanceof z.ZodError) {
+				return new Response(JSON.stringify({ error: error.flatten() }), {
+					status: 400,
+					headers: jsonHeaders,
+				});
+			}
+			const message =
+				error instanceof Error
+					? error.message
+					: "Failed to fetch message detail";
+			if (
+				message.includes("Failed to fetch Gmail message detail: 401") ||
+				message.includes("Failed to fetch Gmail message detail: 403")
+			) {
+				return new Response(
+					JSON.stringify({
+						error: "Gmail authorization expired. Please sign in again.",
+						needsGoogleAuth: true,
+					}),
+					{
+						status: 400,
+						headers: jsonHeaders,
+					},
+				);
+			}
+			return new Response(JSON.stringify({ error: message }), {
+				status: 500,
 				headers: jsonHeaders,
 			});
 		}
@@ -773,7 +947,11 @@ const optionsHandler = httpAction(async (_ctx, _request) => {
 const http = httpRouter();
 
 http.route({ path: "/api/threads", method: "GET", handler: getHandler });
-http.route({ path: "/api/threads", method: "OPTIONS", handler: optionsHandler });
+http.route({
+	path: "/api/threads",
+	method: "OPTIONS",
+	handler: optionsHandler,
+});
 http.route({
 	path: "/api/auth/google/callback",
 	method: "GET",
@@ -786,9 +964,33 @@ http.route({
 });
 
 http.route({ path: "/api/classify", method: "POST", handler: postHandler });
-http.route({ path: "/api/classify", method: "OPTIONS", handler: optionsHandler });
+http.route({
+	path: "/api/classify",
+	method: "OPTIONS",
+	handler: optionsHandler,
+});
+http.route({ path: "/api/chat/search", method: "POST", handler: postHandler });
+http.route({
+	path: "/api/chat/search",
+	method: "OPTIONS",
+	handler: optionsHandler,
+});
 http.route({ path: "/api/buckets", method: "POST", handler: postHandler });
-http.route({ path: "/api/buckets", method: "OPTIONS", handler: optionsHandler });
+http.route({
+	path: "/api/buckets",
+	method: "OPTIONS",
+	handler: optionsHandler,
+});
+http.route({
+	path: "/api/messages/detail",
+	method: "POST",
+	handler: postHandler,
+});
+http.route({
+	path: "/api/messages/detail",
+	method: "OPTIONS",
+	handler: optionsHandler,
+});
 http.route({
 	path: "/api/messages/check-new",
 	method: "POST",

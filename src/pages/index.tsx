@@ -1,13 +1,16 @@
 import {
 	AlertCircle,
 	Archive,
+	ArrowLeft,
 	Clock3,
 	LogOut,
+	MessageCircle,
 	Newspaper,
 	RefreshCw,
 	Settings2,
 	Sparkles,
 	Tag,
+	X,
 } from "lucide-react";
 import Head from "next/head";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -47,6 +50,33 @@ type CheckNewResponse = {
 	latestIds: string[];
 	needsGoogleAuth?: boolean;
 	error?: string;
+};
+
+type ChatResultItem = {
+	id: string;
+	subject: string;
+	snippet: string;
+	sender?: string;
+	receivedAt?: number;
+};
+
+type ChatSearchResponse = {
+	query: string;
+	totalCandidates: number;
+	results: ChatResultItem[];
+	error?: string;
+	needsGoogleAuth?: boolean;
+};
+
+type MessageDetailResponse = {
+	id: string;
+	subject?: string;
+	from?: string;
+	to?: string;
+	date?: string;
+	html: string;
+	error?: string;
+	needsGoogleAuth?: boolean;
 };
 
 const defaultBucketOrder = [
@@ -101,6 +131,39 @@ const formatThreadDate = (receivedAt?: number) => {
 		day: "numeric",
 	}).format(new Date(receivedAt));
 };
+
+const buildMessageSrcDoc = (rawHtml: string) => `<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<style>
+		html, body { margin: 0; padding: 0; }
+		body {
+			padding: 12px;
+			font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+			font-size: 14px;
+			line-height: 1.45;
+			color: #0f172a;
+			white-space: normal;
+			word-break: break-word;
+			overflow-wrap: anywhere;
+		}
+		* {
+			max-width: 100%;
+			box-sizing: border-box;
+			word-break: break-word;
+			overflow-wrap: anywhere;
+		}
+		pre {
+			white-space: pre-wrap;
+			word-break: break-word;
+			overflow-wrap: anywhere;
+		}
+	</style>
+</head>
+<body>${rawHtml}</body>
+</html>`;
 
 const sortThreadsByRecency = (left: BucketedThread, right: BucketedThread) => {
 	const leftTime = typeof left.receivedAt === "number" ? left.receivedAt : 0;
@@ -157,6 +220,26 @@ export default function Home() {
 	const [categoryActionKey, setCategoryActionKey] = useState<string | null>(
 		null,
 	);
+	const [isChatOpen, setIsChatOpen] = useState(false);
+	const [chatQuery, setChatQuery] = useState("");
+	const [chatLoading, setChatLoading] = useState(false);
+	const [chatError, setChatError] = useState<string | null>(null);
+	const [chatResults, setChatResults] = useState<ChatResultItem[]>([]);
+	const [selectedChatEmail, setSelectedChatEmail] =
+		useState<ChatResultItem | null>(null);
+	const [messageDetail, setMessageDetail] =
+		useState<MessageDetailResponse | null>(null);
+	const [messageLoading, setMessageLoading] = useState(false);
+	const [messageError, setMessageError] = useState<string | null>(null);
+	const [isCategoryMessageOpen, setIsCategoryMessageOpen] = useState(false);
+	const [selectedCategoryEmail, setSelectedCategoryEmail] =
+		useState<ChatResultItem | null>(null);
+	const [categoryMessageDetail, setCategoryMessageDetail] =
+		useState<MessageDetailResponse | null>(null);
+	const [categoryMessageLoading, setCategoryMessageLoading] = useState(false);
+	const [categoryMessageError, setCategoryMessageError] = useState<
+		string | null
+	>(null);
 	const isUpdatingBadgeVisible = updatingBadgeCount > 0;
 	const hasHydratedFromCache = useRef(false);
 
@@ -411,7 +494,11 @@ export default function Home() {
 					(await response.json()) as InboxResponse,
 				);
 				if (!response.ok) {
-					setError(options?.errorMessage ?? payload.error ?? "Failed to recategorize threads");
+					setError(
+						options?.errorMessage ??
+							payload.error ??
+							"Failed to recategorize threads",
+					);
 					return;
 				}
 				setData(payload);
@@ -517,43 +604,168 @@ export default function Home() {
 		[categoryDrafts, recategorize],
 	);
 
-	const deleteCategory = useCallback(async (bucketId: string) => {
-		setError(null);
-		setCategoryActionKey(`delete-${bucketId}`);
-		const response = await fetch(convexApiUrl("/api/buckets"), {
-			method: "DELETE",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ id: bucketId }),
-		});
-		const payload = normalizeInboxResponse(
-			(await response.json()) as InboxResponse,
-		);
-		if (!response.ok) {
-			setError("Failed to delete category");
-			setCategoryActionKey(null);
-			return;
-		}
-
-		setData(payload);
-		setSelectedBucketId((current) => {
-			if (
-				current &&
-				Array.isArray(payload.buckets) &&
-				payload.buckets.some((bucket) => bucket.id === current)
-			) {
-				return current;
+	const deleteCategory = useCallback(
+		async (bucketId: string) => {
+			setError(null);
+			setCategoryActionKey(`delete-${bucketId}`);
+			const response = await fetch(convexApiUrl("/api/buckets"), {
+				method: "DELETE",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: bucketId }),
+			});
+			const payload = normalizeInboxResponse(
+				(await response.json()) as InboxResponse,
+			);
+			if (!response.ok) {
+				setError("Failed to delete category");
+				setCategoryActionKey(null);
+				return;
 			}
-			return getImportantBucketId(payload);
-		});
-		setCategoryActionKey(null);
-		await recategorize({
-			errorMessage: "Category deleted, but failed to recategorize threads",
-		});
-	}, [recategorize]);
+
+			setData(payload);
+			setSelectedBucketId((current) => {
+				if (
+					current &&
+					Array.isArray(payload.buckets) &&
+					payload.buckets.some((bucket) => bucket.id === current)
+				) {
+					return current;
+				}
+				return getImportantBucketId(payload);
+			});
+			setCategoryActionKey(null);
+			await recategorize({
+				errorMessage: "Category deleted, but failed to recategorize threads",
+			});
+		},
+		[recategorize],
+	);
 
 	const refreshInbox = useCallback(async () => {
 		await loadThreads({ background: true, showUpdatingBadge: true });
 	}, [loadThreads]);
+
+	const closeChat = useCallback(() => {
+		setIsChatOpen(false);
+		setChatError(null);
+		setMessageError(null);
+		setMessageDetail(null);
+		setSelectedChatEmail(null);
+	}, []);
+
+	const searchChat = useCallback(async () => {
+		const query = chatQuery.trim();
+		if (query.length < 2) {
+			setChatError("Please enter at least 2 characters.");
+			return;
+		}
+
+		setChatLoading(true);
+		setChatError(null);
+		setMessageError(null);
+		setMessageDetail(null);
+		setSelectedChatEmail(null);
+		try {
+			const response = await fetch(convexApiUrl("/api/chat/search"), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ query }),
+			});
+			const payload = (await response.json()) as ChatSearchResponse;
+			if (!response.ok) {
+				setChatError(payload.error ?? "Failed to search emails");
+				setChatResults([]);
+				return;
+			}
+			setChatResults(Array.isArray(payload.results) ? payload.results : []);
+		} catch {
+			setChatError("Failed to search emails");
+			setChatResults([]);
+		} finally {
+			setChatLoading(false);
+		}
+	}, [chatQuery]);
+
+	const loadMessageDetail = useCallback(async (email: ChatResultItem) => {
+		setSelectedChatEmail(email);
+		setMessageLoading(true);
+		setMessageError(null);
+		setMessageDetail(null);
+		try {
+			const response = await fetch(convexApiUrl("/api/messages/detail"), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: email.id }),
+			});
+			const payload = (await response.json()) as MessageDetailResponse;
+			if (!response.ok) {
+				setMessageError(payload.error ?? "Failed to load email");
+				return;
+			}
+			setMessageDetail(payload);
+		} catch {
+			setMessageError("Failed to load email");
+		} finally {
+			setMessageLoading(false);
+		}
+	}, []);
+
+	const closeCategoryMessage = useCallback(() => {
+		setIsCategoryMessageOpen(false);
+		setSelectedCategoryEmail(null);
+		setCategoryMessageDetail(null);
+		setCategoryMessageError(null);
+	}, []);
+
+	const openCategoryMessage = useCallback(async (thread: BucketedThread) => {
+		const email: ChatResultItem = {
+			id: thread.id,
+			subject: thread.subject,
+			snippet: thread.snippet,
+			receivedAt: thread.receivedAt,
+		};
+		setIsCategoryMessageOpen(true);
+		setSelectedCategoryEmail(email);
+		setCategoryMessageLoading(true);
+		setCategoryMessageError(null);
+		setCategoryMessageDetail(null);
+		try {
+			const response = await fetch(convexApiUrl("/api/messages/detail"), {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ id: email.id }),
+			});
+			const payload = (await response.json()) as MessageDetailResponse;
+			if (!response.ok) {
+				setCategoryMessageError(payload.error ?? "Failed to load email");
+				return;
+			}
+			setCategoryMessageDetail(payload);
+		} catch {
+			setCategoryMessageError("Failed to load email");
+		} finally {
+			setCategoryMessageLoading(false);
+		}
+	}, []);
+
+	useEffect(() => {
+		if (!isChatOpen && !isCategoryMessageOpen) {
+			return;
+		}
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				if (isCategoryMessageOpen) {
+					closeCategoryMessage();
+					return;
+				}
+				closeChat();
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => {
+			window.removeEventListener("keydown", onKeyDown);
+		};
+	}, [closeCategoryMessage, closeChat, isCategoryMessageOpen, isChatOpen]);
 
 	const showSignInButton =
 		data?.needsGoogleAuth === true ||
@@ -606,6 +818,14 @@ export default function Home() {
 							) : null}
 							<button
 								className={buttonClass}
+								onClick={() => setIsChatOpen(true)}
+								type="button"
+							>
+								<MessageCircle className="mr-2 inline h-4 w-4" />
+								Chat
+							</button>
+							<button
+								className={buttonClass}
 								onClick={() => void refreshInbox()}
 								type="button"
 							>
@@ -654,9 +874,9 @@ export default function Home() {
 						</section>
 					) : null}
 
-						{data && !data.needsGoogleAuth ? (
-							<section className="grid gap-4 lg:grid-cols-4">
-								<aside className="rounded-lg border bg-white p-4 lg:col-span-1">
+					{data && !data.needsGoogleAuth ? (
+						<section className="grid gap-4 lg:grid-cols-4">
+							<aside className="rounded-lg border bg-white p-4 lg:col-span-1">
 								<h2 className="mb-3 font-semibold text-base">Categories</h2>
 								<div className="flex flex-col gap-1">
 									{orderedBuckets.map((bucket) => {
@@ -710,7 +930,7 @@ export default function Home() {
 								</div>
 							</aside>
 
-								<div className="rounded-lg border bg-white p-4 lg:col-span-3">
+							<div className="rounded-lg border bg-white p-4 lg:col-span-3">
 								{showConfigure ? (
 									<div className="space-y-3">
 										<h3 className="font-semibold text-lg">
@@ -869,26 +1089,32 @@ export default function Home() {
 													className="border-b pb-2 last:border-b-0"
 													key={thread.id}
 												>
-													<div className="flex items-start justify-between gap-2">
-														<p className="truncate font-medium text-sm">
-															{thread.subject}
-														</p>
-														{typeof thread.receivedAt === "number" ? (
-															<p className="shrink-0 text-slate-500 text-xs">
-																{formatThreadDate(thread.receivedAt)}
-															</p>
-														) : null}
-													</div>
-													<p
-														className="mt-1 overflow-hidden text-slate-500 text-sm leading-5"
-														style={{
-															display: "-webkit-box",
-															WebkitBoxOrient: "vertical",
-															WebkitLineClamp: 2,
-														}}
+													<button
+														className="w-full cursor-pointer text-left hover:bg-slate-50 rounded-md p-2"
+														onClick={() => void openCategoryMessage(thread)}
+														type="button"
 													>
-														{thread.snippet}
-													</p>
+														<div className="flex items-start justify-between gap-2">
+															<p className="truncate font-medium text-sm">
+																{thread.subject}
+															</p>
+															{typeof thread.receivedAt === "number" ? (
+																<p className="shrink-0 text-slate-500 text-xs">
+																	{formatThreadDate(thread.receivedAt)}
+																</p>
+															) : null}
+														</div>
+														<p
+															className="mt-1 overflow-hidden text-slate-500 text-sm leading-5"
+															style={{
+																display: "-webkit-box",
+																WebkitBoxOrient: "vertical",
+																WebkitLineClamp: 2,
+															}}
+														>
+															{thread.snippet}
+														</p>
+													</button>
 												</li>
 											))}
 											{selectedGroup.threads.length === 0 ? (
@@ -907,6 +1133,185 @@ export default function Home() {
 						</section>
 					) : null}
 				</div>
+				{isChatOpen ? (
+					<div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/30 p-3 sm:p-6">
+						<div className="h-[88vh] w-[95vw] overflow-hidden rounded-lg border bg-white shadow-xl md:w-1/2">
+							<div className="flex items-center justify-between border-b px-4 py-3">
+								<h2 className="font-semibold text-base">Chat</h2>
+								<button
+									className="cursor-pointer rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+									onClick={closeChat}
+									type="button"
+								>
+									<X className="h-4 w-4" />
+								</button>
+							</div>
+							<div className="flex h-[calc(100%-53px)] flex-col">
+								<div className="space-y-3 border-b p-4">
+									<p className="text-slate-600 text-sm">
+										Find relevant emails using natural language
+									</p>
+									<div className="flex gap-2">
+										<input
+											className="w-full rounded-md border px-3 py-2 text-sm"
+											onChange={(event) => setChatQuery(event.target.value)}
+											onKeyDown={(event) => {
+												if (event.key === "Enter") {
+													event.preventDefault();
+													void searchChat();
+												}
+											}}
+											placeholder='Try "show me emails from sabih"'
+											value={chatQuery}
+										/>
+										<button
+											className={buttonClass}
+											disabled={chatLoading}
+											onClick={() => void searchChat()}
+											type="button"
+										>
+											{chatLoading ? "Searching..." : "Search"}
+										</button>
+									</div>
+									{chatError ? (
+										<p className="text-red-600 text-xs">{chatError}</p>
+									) : null}
+								</div>
+								<div className="flex-1 overflow-y-auto p-4">
+									{selectedChatEmail ? (
+										<div className="flex h-full min-h-0 flex-col gap-3">
+											<button
+												className="inline-flex items-center gap-1 text-slate-600 text-xs hover:text-slate-900 cursor-pointer"
+												onClick={() => {
+													setSelectedChatEmail(null);
+													setMessageDetail(null);
+													setMessageError(null);
+												}}
+												type="button"
+											>
+												<ArrowLeft className="h-3.5 w-3.5" />
+												Back to results
+											</button>
+											<div>
+												<p className="break-words font-medium text-sm whitespace-normal">
+													{messageDetail?.subject ?? selectedChatEmail.subject}
+												</p>
+												{messageDetail?.from ? (
+													<p className="break-words text-slate-500 text-xs whitespace-normal">
+														{messageDetail.from}
+													</p>
+												) : selectedChatEmail.sender ? (
+													<p className="break-words text-slate-500 text-xs whitespace-normal">
+														{selectedChatEmail.sender}
+													</p>
+												) : null}
+											</div>
+											{messageLoading ? (
+												<p className="text-slate-500 text-sm">
+													Loading email...
+												</p>
+											) : messageError ? (
+												<p className="text-red-600 text-sm">{messageError}</p>
+											) : messageDetail ? (
+												<iframe
+													className="h-full min-h-0 w-full flex-1 rounded-md border"
+													sandbox=""
+													srcDoc={buildMessageSrcDoc(messageDetail.html)}
+													title={`message-${messageDetail.id}`}
+												/>
+											) : (
+												<p className="text-slate-500 text-sm">
+													No email content available.
+												</p>
+											)}
+										</div>
+									) : (
+										<ul className="space-y-3">
+											{chatResults.map((email) => (
+												<li key={email.id}>
+													<button
+														className="w-full cursor-pointer rounded-md border p-3 text-left hover:bg-slate-50"
+														onClick={() => void loadMessageDetail(email)}
+														type="button"
+													>
+														<div className="flex items-start justify-between gap-2">
+															<p className="break-words font-medium text-sm whitespace-normal">
+																{email.subject}
+															</p>
+															{typeof email.receivedAt === "number" ? (
+																<p className="shrink-0 text-slate-500 text-xs">
+																	{formatThreadDate(email.receivedAt)}
+																</p>
+															) : null}
+														</div>
+														{email.sender ? (
+															<p className="mt-0.5 break-words text-slate-500 text-xs whitespace-normal">
+																{email.sender}
+															</p>
+														) : null}
+														<p className="mt-1 break-words text-slate-600 text-sm whitespace-normal">
+															{email.snippet}
+														</p>
+													</button>
+												</li>
+											))}
+											{!chatLoading && chatResults.length === 0 ? (
+												<li className="text-slate-500 text-sm">
+													Run a search to see matching emails.
+												</li>
+											) : null}
+										</ul>
+									)}
+								</div>
+							</div>
+						</div>
+					</div>
+				) : null}
+				{isCategoryMessageOpen && selectedCategoryEmail ? (
+					<div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/30 p-3 sm:p-6">
+						<div className="h-[88vh] w-[95vw] overflow-hidden rounded-lg border bg-white shadow-xl md:w-1/2">
+							<div className="flex items-center justify-between border-b px-4 py-3">
+								<h2 className="font-semibold text-base">Email</h2>
+								<button
+									className="cursor-pointer rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+									onClick={closeCategoryMessage}
+									type="button"
+								>
+									<X className="h-4 w-4" />
+								</button>
+							</div>
+							<div className="flex h-[calc(100%-53px)] flex-col gap-3 p-4">
+								<div>
+									<p className="break-words font-medium text-sm whitespace-normal">
+										{categoryMessageDetail?.subject ??
+											selectedCategoryEmail.subject}
+									</p>
+									{categoryMessageDetail?.from ? (
+										<p className="break-words text-slate-500 text-xs whitespace-normal">
+											{categoryMessageDetail.from}
+										</p>
+									) : null}
+								</div>
+								{categoryMessageLoading ? (
+									<p className="text-slate-500 text-sm">Loading email...</p>
+								) : categoryMessageError ? (
+									<p className="text-red-600 text-sm">{categoryMessageError}</p>
+								) : categoryMessageDetail ? (
+									<iframe
+										className="h-full min-h-0 w-full flex-1 rounded-md border"
+										sandbox=""
+										srcDoc={buildMessageSrcDoc(categoryMessageDetail.html)}
+										title={`message-${categoryMessageDetail.id}`}
+									/>
+								) : (
+									<p className="text-slate-500 text-sm">
+										No email content available.
+									</p>
+								)}
+							</div>
+						</div>
+					</div>
+				) : null}
 			</main>
 		</>
 	);

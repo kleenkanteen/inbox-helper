@@ -15,6 +15,7 @@ const MAX_THREADS = 200;
 const PREVIEW_LIMIT = 300;
 const MODEL_TIMEOUT_MS = 45000;
 const MAX_CONCURRENT_CLASSIFICATIONS = 12;
+const CHAT_SEARCH_TIMEOUT_MS = 20000;
 
 const getEnv = (key: string) => {
 	const value = process.env[key];
@@ -27,6 +28,10 @@ const classificationSchema = z.object({
 	bucketId: z.string(),
 	confidence: z.number().min(0).max(1),
 	reason: z.string().max(240),
+});
+
+const chatSearchSchema = z.object({
+	matchedIds: z.array(z.string()).max(50),
 });
 
 const classifySingleThreadWithModel = async ({
@@ -145,33 +150,31 @@ export const classifyThreads = async (
 			}
 		};
 
-		await Promise.all(
-			Array.from({ length: maxConcurrent }, () => worker()),
-		);
+		await Promise.all(Array.from({ length: maxConcurrent }, () => worker()));
 		return results;
 	};
 
 	try {
 		const xaiApiKey = getEnv("XAI_API_KEY");
-			if (!xaiApiKey) {
-				throw new Error("Missing XAI_API_KEY");
-			}
-			const xai = createXai({ apiKey: xaiApiKey });
-			return await classifyInParallel(xai(XAI_MODEL_ID), "xAI classification");
-		} catch (error) {
-			errors.push(`xAI failed: ${(error as Error).message}`);
+		if (!xaiApiKey) {
+			throw new Error("Missing XAI_API_KEY");
 		}
+		const xai = createXai({ apiKey: xaiApiKey });
+		return await classifyInParallel(xai(XAI_MODEL_ID), "xAI classification");
+	} catch (error) {
+		errors.push(`xAI failed: ${(error as Error).message}`);
+	}
 
 	try {
 		const openAiApiKey = getEnv("OPENAI_API_KEY");
-			if (!openAiApiKey) {
-				throw new Error("Missing OPENAI_API_KEY");
-			}
-			const openai = createOpenAI({ apiKey: openAiApiKey });
-			return await classifyInParallel(
-				openai(OPENAI_MODEL_ID),
-				"OpenAI classification",
-			);
+		if (!openAiApiKey) {
+			throw new Error("Missing OPENAI_API_KEY");
+		}
+		const openai = createOpenAI({ apiKey: openAiApiKey });
+		return await classifyInParallel(
+			openai(OPENAI_MODEL_ID),
+			"OpenAI classification",
+		);
 	} catch (error) {
 		errors.push(`OpenAI failed: ${(error as Error).message}`);
 	}
@@ -184,4 +187,148 @@ export const classifyThreads = async (
 		confidence: 0.2,
 		reason: `Fallback classification. ${errors.join(" | ")}`.slice(0, 240),
 	}));
+};
+
+const deterministicSearch = (
+	query: string,
+	threads: ThreadSummary[],
+	limit: number,
+) => {
+	const loweredTokens = query
+		.toLowerCase()
+		.split(/[\s,.;:!?]+/)
+		.map((token) => token.trim())
+		.filter((token) => token.length >= 2);
+
+	if (loweredTokens.length === 0) {
+		return [] as string[];
+	}
+
+	const ranked = threads
+		.map((thread) => {
+			const haystack =
+				`${thread.sender ?? ""} ${thread.subject} ${thread.snippet}`.toLowerCase();
+			let score = 0;
+			for (const token of loweredTokens) {
+				if (haystack.includes(token)) {
+					score += token.length >= 5 ? 2 : 1;
+				}
+			}
+			return {
+				id: thread.id,
+				score,
+				receivedAt: thread.receivedAt ?? 0,
+			};
+		})
+		.filter((entry) => entry.score > 0)
+		.sort((left, right) => {
+			if (left.score !== right.score) {
+				return right.score - left.score;
+			}
+			if (left.receivedAt !== right.receivedAt) {
+				return right.receivedAt - left.receivedAt;
+			}
+			return left.id.localeCompare(right.id);
+		});
+
+	return ranked.slice(0, limit).map((entry) => entry.id);
+};
+
+const searchWithModel = async ({
+	model,
+	query,
+	threads,
+	limit,
+}: {
+	model: Parameters<typeof generateObject>[0]["model"];
+	query: string;
+	threads: ThreadSummary[];
+	limit: number;
+}) => {
+	const candidates = threads.slice(0, MAX_THREADS).map((thread) => ({
+		id: thread.id,
+		sender: thread.sender ?? "",
+		subject: thread.subject.trim() || "(No Subject)",
+		snippet: truncatePreview(thread.snippet),
+		receivedAt: thread.receivedAt ?? 0,
+	}));
+
+	const allowedIds = new Set(candidates.map((candidate) => candidate.id));
+	const { object } = await withTimeout(
+		generateObject({
+			model,
+			schema: chatSearchSchema,
+			temperature: 0,
+			system:
+				"You identify relevant emails for a user query. Use only sender, subject, and snippet text. Do not invent ids.",
+			prompt: `Return at most ${limit} ids relevant to this query.\n\nQuery:\n${query}\n\nCandidates:\n${JSON.stringify(candidates)}\n\nRules:\n- Return only ids present in candidates.\n- Prioritize exact sender matches for 'from <person>' requests.\n- Prefer semantically relevant emails.\n- Return empty list when nothing is relevant.`,
+		}),
+		CHAT_SEARCH_TIMEOUT_MS,
+		"chat search",
+	);
+
+	const matchedIds: string[] = [];
+	for (const id of object.matchedIds) {
+		if (!allowedIds.has(id) || matchedIds.includes(id)) {
+			continue;
+		}
+		matchedIds.push(id);
+		if (matchedIds.length >= limit) {
+			break;
+		}
+	}
+	return matchedIds;
+};
+
+export const searchRelevantThreads = async ({
+	query,
+	threads,
+	limit = 15,
+}: {
+	query: string;
+	threads: ThreadSummary[];
+	limit?: number;
+}) => {
+	const safeLimit = Math.max(1, Math.min(50, limit));
+	const limitedThreads = threads.slice(0, MAX_THREADS);
+
+	try {
+		const xaiApiKey = getEnv("XAI_API_KEY");
+		if (!xaiApiKey) {
+			throw new Error("Missing XAI_API_KEY");
+		}
+		const xai = createXai({ apiKey: xaiApiKey });
+		return await searchWithModel({
+			model: xai(XAI_MODEL_ID),
+			query,
+			threads: limitedThreads,
+			limit: safeLimit,
+		});
+	} catch (error) {
+		console.warn("[chat-search] xAI model unavailable", error);
+	}
+
+	try {
+		const openAiApiKey = getEnv("OPENAI_API_KEY");
+		if (!openAiApiKey) {
+			throw new Error("Missing OPENAI_API_KEY");
+		}
+		const openai = createOpenAI({ apiKey: openAiApiKey });
+		return await searchWithModel({
+			model: openai(OPENAI_MODEL_ID),
+			query,
+			threads: limitedThreads,
+			limit: safeLimit,
+		});
+	} catch (error) {
+		console.warn("[chat-search] OpenAI model unavailable", error);
+	}
+
+	const fallback = deterministicSearch(query, limitedThreads, safeLimit);
+	if (fallback.length > 0) {
+		return fallback;
+	}
+
+	// Preserve determinism when no provider is available and no keyword match exists.
+	return [];
 };
