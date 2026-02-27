@@ -495,31 +495,6 @@ const postHandler = httpAction(async (ctx, request) => {
 				name: payload.name,
 				description: payload.description,
 			});
-
-			const data = (await ctx.runQuery(api.inbox.getThreadsAndBuckets, {
-				userId,
-			})) as {
-				buckets: BucketDefinition[];
-				threads: ThreadSummary[];
-			};
-			const classifications = data.threads.length
-				? await classifyThreads(data.threads, data.buckets)
-				: [];
-			if (classifications.length > 0) {
-				await ctx.runMutation(api.inbox.upsertCachedClassifications, {
-					userId,
-					entries: classifications.map((classification) => ({
-						emailId: classification.threadId,
-						bucketId: classification.bucketId,
-						confidence: classification.confidence,
-						reason: classification.reason,
-					})),
-				});
-			}
-			await ctx.runMutation(api.inbox.saveClassifications, {
-				userId,
-				classifications,
-			});
 			const inbox = await ctx.runQuery(api.inbox.getInbox, { userId });
 			return new Response(JSON.stringify(inbox), {
 				status: 200,
@@ -598,8 +573,31 @@ const postHandler = httpAction(async (ctx, request) => {
 					headers: jsonHeaders,
 				});
 			}
-			return new Response(JSON.stringify({ error: "Unauthorized" }), {
-				status: 401,
+			const message =
+				error instanceof Error
+					? error.message
+					: "Failed to check for new messages";
+			if (
+				message.includes("Failed to fetch Gmail message ids: 401") ||
+				message.includes("Failed to fetch Gmail message ids: 403")
+			) {
+				return new Response(
+					JSON.stringify({
+						hasNew: false,
+						newCount: 0,
+						latestIds: [] as string[],
+						needsGoogleAuth: true,
+						error: "Gmail authorization expired. Please sign in again.",
+					}),
+					{
+						status: 200,
+						headers: jsonHeaders,
+					},
+				);
+			}
+
+			return new Response(JSON.stringify({ error: message }), {
+				status: 500,
 				headers: jsonHeaders,
 			});
 		}
@@ -693,31 +691,6 @@ const putHandler = httpAction(async (ctx, request) => {
 			name: payload.name,
 			description: payload.description,
 		});
-
-		const data = (await ctx.runQuery(api.inbox.getThreadsAndBuckets, {
-			userId,
-		})) as {
-			buckets: BucketDefinition[];
-			threads: ThreadSummary[];
-		};
-		const classifications = data.threads.length
-			? await classifyThreads(data.threads, data.buckets)
-			: [];
-		if (classifications.length > 0) {
-			await ctx.runMutation(api.inbox.upsertCachedClassifications, {
-				userId,
-				entries: classifications.map((classification) => ({
-					emailId: classification.threadId,
-					bucketId: classification.bucketId,
-					confidence: classification.confidence,
-					reason: classification.reason,
-				})),
-			});
-		}
-		await ctx.runMutation(api.inbox.saveClassifications, {
-			userId,
-			classifications,
-		});
 		const inbox = await ctx.runQuery(api.inbox.getInbox, { userId });
 		return new Response(JSON.stringify(inbox), {
 			status: 200,
@@ -766,31 +739,6 @@ const deleteHandler = httpAction(async (ctx, request) => {
 		await ctx.runMutation(api.inbox.deleteBucket, {
 			userId,
 			bucketId: payload.id,
-		});
-
-		const data = (await ctx.runQuery(api.inbox.getThreadsAndBuckets, {
-			userId,
-		})) as {
-			buckets: BucketDefinition[];
-			threads: ThreadSummary[];
-		};
-		const classifications = data.threads.length
-			? await classifyThreads(data.threads, data.buckets)
-			: [];
-		if (classifications.length > 0) {
-			await ctx.runMutation(api.inbox.upsertCachedClassifications, {
-				userId,
-				entries: classifications.map((classification) => ({
-					emailId: classification.threadId,
-					bucketId: classification.bucketId,
-					confidence: classification.confidence,
-					reason: classification.reason,
-				})),
-			});
-		}
-		await ctx.runMutation(api.inbox.saveClassifications, {
-			userId,
-			classifications,
 		});
 		const inbox = await ctx.runQuery(api.inbox.getInbox, { userId });
 		return new Response(JSON.stringify(inbox), {

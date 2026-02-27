@@ -10,7 +10,7 @@ import {
 	Tag,
 } from "lucide-react";
 import Head from "next/head";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SpinnerBadge } from "#/components/spinner-badge";
 import { env } from "#/env";
 import { authClient } from "#/server/better-auth/client";
@@ -44,7 +44,6 @@ type InboxResponse = {
 
 type CheckNewResponse = {
 	hasNew: boolean;
-	newCount: number;
 	latestIds: string[];
 	needsGoogleAuth?: boolean;
 	error?: string;
@@ -61,6 +60,7 @@ const convexSiteUrl =
 	env.NEXT_PUBLIC_CONVEX_SITE_URL?.replace(/\/+$/, "") ?? "";
 const convexApiUrl = (path: string) =>
 	convexSiteUrl ? `${convexSiteUrl}${path}` : path;
+const inboxCacheKey = "inbox-helper:inbox-response:v1";
 
 const buttonClass =
 	"cursor-pointer rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60";
@@ -102,9 +102,50 @@ const formatThreadDate = (receivedAt?: number) => {
 	}).format(new Date(receivedAt));
 };
 
+const sortThreadsByRecency = (left: BucketedThread, right: BucketedThread) => {
+	const leftTime = typeof left.receivedAt === "number" ? left.receivedAt : 0;
+	const rightTime = typeof right.receivedAt === "number" ? right.receivedAt : 0;
+	if (leftTime !== rightTime) {
+		return rightTime - leftTime;
+	}
+	return left.id.localeCompare(right.id);
+};
+
+const normalizeInboxResponse = (
+	payload: InboxResponse,
+	maxThreads = 200,
+): InboxResponse => {
+	const grouped = Array.isArray(payload.grouped) ? payload.grouped : [];
+	const flattened = grouped.flatMap((group) =>
+		group.threads.map((thread) => ({
+			bucketId: group.bucket.id,
+			thread,
+		})),
+	);
+	const keptThreadIds = new Set(
+		flattened
+			.sort((left, right) => sortThreadsByRecency(left.thread, right.thread))
+			.slice(0, maxThreads)
+			.map((entry) => entry.thread.id),
+	);
+
+	return {
+		...payload,
+		grouped: grouped.map((group) => ({
+			...group,
+			threads: [...group.threads]
+				.filter((thread) => keptThreadIds.has(thread.id))
+				.sort(sortThreadsByRecency),
+		})),
+	};
+};
+
 export default function Home() {
 	const [data, setData] = useState<InboxResponse | null>(null);
 	const [loading, setLoading] = useState(true);
+	const [updatingBadgeCount, setUpdatingBadgeCount] = useState(0);
+	const [isResolvingGoogleConnection, setIsResolvingGoogleConnection] =
+		useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [selectedBucketId, setSelectedBucketId] = useState<string | null>(null);
 	const [showConfigure, setShowConfigure] = useState(false);
@@ -116,8 +157,8 @@ export default function Home() {
 	const [categoryActionKey, setCategoryActionKey] = useState<string | null>(
 		null,
 	);
-	const [hasNewMessages, setHasNewMessages] = useState(false);
-	const [newMessageCount, setNewMessageCount] = useState(0);
+	const isUpdatingBadgeVisible = updatingBadgeCount > 0;
+	const hasHydratedFromCache = useRef(false);
 
 	const knownThreadIds = useMemo(
 		() =>
@@ -165,39 +206,65 @@ export default function Home() {
 		return groupedByBucketId.get(selectedBucketId) ?? null;
 	}, [groupedByBucketId, selectedBucketId]);
 
-	const loadThreads = useCallback(async () => {
-		setLoading(true);
-		setError(null);
-		const response = await fetch(convexApiUrl("/api/threads?limit=200"), {
-			method: "GET",
-			cache: "no-store",
-		});
-		const payload = (await response.json()) as InboxResponse;
-		if (!response.ok) {
-			setData(payload);
-			setError(payload.error ?? "Failed to load inbox");
-			setLoading(false);
-			return;
-		}
-		setData(payload);
-		setSelectedBucketId((current) => {
-			if (
-				current &&
-				Array.isArray(payload.buckets) &&
-				payload.buckets.some((bucket) => bucket.id === current)
-			) {
-				return current;
+	const loadThreads = useCallback(
+		async (options?: {
+			background?: boolean;
+			showUpdatingBadge?: boolean;
+			resolveGoogleConnection?: boolean;
+		}) => {
+			const isBackground = options?.background ?? false;
+			if (!isBackground) {
+				setLoading(true);
 			}
-			return getImportantBucketId(payload);
-		});
-		setHasNewMessages(false);
-		setNewMessageCount(0);
-		setLoading(false);
-	}, []);
+			if (options?.showUpdatingBadge) {
+				setUpdatingBadgeCount((count) => count + 1);
+			}
+			if (options?.resolveGoogleConnection) {
+				setIsResolvingGoogleConnection(true);
+			}
+			setError(null);
+			try {
+				const response = await fetch(convexApiUrl("/api/threads?limit=200"), {
+					method: "GET",
+					cache: "no-store",
+				});
+				const payload = (await response.json()) as InboxResponse;
+				const normalizedPayload = normalizeInboxResponse(payload);
+				if (!response.ok) {
+					setData(normalizedPayload);
+					setError(payload.error ?? "Failed to load inbox");
+					return;
+				}
+
+				setData(normalizedPayload);
+				setSelectedBucketId((current) => {
+					if (
+						current &&
+						Array.isArray(normalizedPayload.buckets) &&
+						normalizedPayload.buckets.some((bucket) => bucket.id === current)
+					) {
+						return current;
+					}
+					return getImportantBucketId(normalizedPayload);
+				});
+			} finally {
+				if (!isBackground) {
+					setLoading(false);
+				}
+				if (options?.showUpdatingBadge) {
+					setUpdatingBadgeCount((count) => Math.max(0, count - 1));
+				}
+				if (options?.resolveGoogleConnection) {
+					setIsResolvingGoogleConnection(false);
+				}
+			}
+		},
+		[],
+	);
 
 	const checkForNewMessages = useCallback(
-		async (ids?: string[]) => {
-			if (!data || data.needsGoogleAuth) {
+		async (ids?: string[], options?: { needsGoogleAuth?: boolean }) => {
+			if (options?.needsGoogleAuth ?? data?.needsGoogleAuth) {
 				return;
 			}
 
@@ -216,15 +283,72 @@ export default function Home() {
 				return;
 			}
 
-			setHasNewMessages(payload.hasNew);
-			setNewMessageCount(payload.newCount);
+			if (payload.hasNew) {
+				await loadThreads({ background: true });
+			}
 		},
-		[data, knownThreadIds],
+		[data?.needsGoogleAuth, knownThreadIds, loadThreads],
 	);
 
 	useEffect(() => {
-		void loadThreads();
-	}, [loadThreads]);
+		if (hasHydratedFromCache.current) {
+			return;
+		}
+		hasHydratedFromCache.current = true;
+
+		if (typeof window === "undefined") {
+			return;
+		}
+
+		const cached = window.localStorage.getItem(inboxCacheKey);
+		if (!cached) {
+			void loadThreads();
+			return;
+		}
+
+		try {
+			const payload = normalizeInboxResponse(
+				JSON.parse(cached) as InboxResponse,
+			);
+			setData(payload);
+			setSelectedBucketId((current) => {
+				if (
+					current &&
+					Array.isArray(payload.buckets) &&
+					payload.buckets.some((bucket) => bucket.id === current)
+				) {
+					return current;
+				}
+				return getImportantBucketId(payload);
+			});
+			setLoading(false);
+
+			const cachedIds =
+				payload.grouped?.flatMap((group) =>
+					group.threads.map((thread) => thread.id),
+				) ?? [];
+			void checkForNewMessages(cachedIds, {
+				needsGoogleAuth: payload.needsGoogleAuth,
+			});
+			void loadThreads({
+				background: true,
+				showUpdatingBadge: payload.needsGoogleAuth === true,
+				resolveGoogleConnection: payload.needsGoogleAuth === true,
+			});
+		} catch {
+			void loadThreads();
+		}
+	}, [checkForNewMessages, loadThreads]);
+
+	useEffect(() => {
+		if (!data || typeof window === "undefined") {
+			return;
+		}
+		window.localStorage.setItem(
+			inboxCacheKey,
+			JSON.stringify(normalizeInboxResponse(data)),
+		);
+	}, [data]);
 
 	useEffect(() => {
 		if (!data || data.needsGoogleAuth) {
@@ -269,31 +393,46 @@ export default function Home() {
 		} catch {
 			// Continue reload even if there is no active Better Auth session.
 		}
+		if (typeof window !== "undefined") {
+			window.localStorage.removeItem(inboxCacheKey);
+		}
 		window.location.reload();
 	}, []);
 
-	const recategorize = useCallback(async () => {
-		setError(null);
-		const response = await fetch(convexApiUrl("/api/classify"), {
-			method: "POST",
-		});
-		const payload = (await response.json()) as InboxResponse;
-		if (!response.ok) {
-			setError(payload.error ?? "Failed to recategorize threads");
-			return;
-		}
-		setData(payload);
-		setSelectedBucketId((current) => {
-			if (
-				current &&
-				Array.isArray(payload.buckets) &&
-				payload.buckets.some((bucket) => bucket.id === current)
-			) {
-				return current;
+	const recategorize = useCallback(
+		async (options?: { errorMessage?: string }) => {
+			setError(null);
+			setUpdatingBadgeCount((count) => count + 1);
+			try {
+				const response = await fetch(convexApiUrl("/api/classify"), {
+					method: "POST",
+				});
+				const payload = normalizeInboxResponse(
+					(await response.json()) as InboxResponse,
+				);
+				if (!response.ok) {
+					setError(options?.errorMessage ?? payload.error ?? "Failed to recategorize threads");
+					return;
+				}
+				setData(payload);
+				setSelectedBucketId((current) => {
+					if (
+						current &&
+						Array.isArray(payload.buckets) &&
+						payload.buckets.some((bucket) => bucket.id === current)
+					) {
+						return current;
+					}
+					return getImportantBucketId(payload);
+				});
+			} catch {
+				setError(options?.errorMessage ?? "Failed to recategorize threads");
+			} finally {
+				setUpdatingBadgeCount((count) => Math.max(0, count - 1));
 			}
-			return getImportantBucketId(payload);
-		});
-	}, []);
+		},
+		[],
+	);
 
 	const createCategory = useCallback(async () => {
 		if (!newBucketName.trim()) {
@@ -312,7 +451,9 @@ export default function Home() {
 			}),
 		});
 
-		const payload = (await response.json()) as InboxResponse;
+		const payload = normalizeInboxResponse(
+			(await response.json()) as InboxResponse,
+		);
 		if (!response.ok) {
 			setError("Failed to configure category");
 			setCategoryActionKey(null);
@@ -330,10 +471,11 @@ export default function Home() {
 		setShowConfigure(false);
 		setNewBucketName("");
 		setNewBucketDescription("");
-		setHasNewMessages(false);
-		setNewMessageCount(0);
 		setCategoryActionKey(null);
-	}, [newBucketDescription, newBucketName]);
+		await recategorize({
+			errorMessage: "Category saved, but failed to recategorize threads",
+		});
+	}, [newBucketDescription, newBucketName, recategorize]);
 
 	const updateCategory = useCallback(
 		async (bucket: BucketDefinition) => {
@@ -357,7 +499,9 @@ export default function Home() {
 					description: draft.description.trim() || undefined,
 				}),
 			});
-			const payload = (await response.json()) as InboxResponse;
+			const payload = normalizeInboxResponse(
+				(await response.json()) as InboxResponse,
+			);
 			if (!response.ok) {
 				setError("Failed to update category");
 				setCategoryActionKey(null);
@@ -366,8 +510,11 @@ export default function Home() {
 
 			setData(payload);
 			setCategoryActionKey(null);
+			await recategorize({
+				errorMessage: "Category saved, but failed to recategorize threads",
+			});
 		},
-		[categoryDrafts],
+		[categoryDrafts, recategorize],
 	);
 
 	const deleteCategory = useCallback(async (bucketId: string) => {
@@ -378,7 +525,9 @@ export default function Home() {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ id: bucketId }),
 		});
-		const payload = (await response.json()) as InboxResponse;
+		const payload = normalizeInboxResponse(
+			(await response.json()) as InboxResponse,
+		);
 		if (!response.ok) {
 			setError("Failed to delete category");
 			setCategoryActionKey(null);
@@ -397,17 +546,37 @@ export default function Home() {
 			return getImportantBucketId(payload);
 		});
 		setCategoryActionKey(null);
-	}, []);
+		await recategorize({
+			errorMessage: "Category deleted, but failed to recategorize threads",
+		});
+	}, [recategorize]);
 
 	const refreshInbox = useCallback(async () => {
-		await checkForNewMessages();
-		await loadThreads();
-	}, [checkForNewMessages, loadThreads]);
+		await loadThreads({ background: true, showUpdatingBadge: true });
+	}, [loadThreads]);
 
 	const showSignInButton =
 		data?.needsGoogleAuth === true ||
 		(error?.toLowerCase().includes("gmail authorization expired") ?? false) ||
 		(error?.toLowerCase().includes("google account is not connected") ?? false);
+
+	if (loading && !data) {
+		return (
+			<>
+				<Head>
+					<title>Inbox Helper</title>
+					<meta
+						content="LLM-powered Gmail bucket categorization"
+						name="description"
+					/>
+					<link href="/favicon.ico" rel="icon" />
+				</Head>
+				<main className="flex min-h-screen items-center justify-center bg-slate-100 text-slate-900">
+					<SpinnerBadge />
+				</main>
+			</>
+		);
+	}
 
 	return (
 		<>
@@ -424,15 +593,6 @@ export default function Home() {
 					<header className="flex flex-wrap items-start justify-between gap-3">
 						<div>
 							<h1 className="font-bold text-3xl">Eagle Eye</h1>
-							{hasNewMessages ? (
-								<div className="mt-2 flex items-center gap-2">
-									<SpinnerBadge />
-									<span className="text-slate-600 text-xs">
-										{newMessageCount} new message
-										{newMessageCount === 1 ? "" : "s"}
-									</span>
-								</div>
-							) : null}
 						</div>
 						<div className="flex gap-2">
 							{showSignInButton ? (
@@ -471,10 +631,15 @@ export default function Home() {
 						</div>
 					</header>
 
-					{loading ? <p>Loading inbox...</p> : null}
+					{isUpdatingBadgeVisible ? (
+						<div className="flex justify-center">
+							<SpinnerBadge />
+						</div>
+					) : null}
+
 					{error ? <p className="text-red-600 text-sm">{error}</p> : null}
 
-					{data?.needsGoogleAuth ? (
+					{data?.needsGoogleAuth && !isResolvingGoogleConnection ? (
 						<section className="rounded-lg border bg-white p-5">
 							<p className="mb-3 text-slate-700 text-sm">
 								Connect your Google Workspace account to grant Gmail access.
@@ -489,9 +654,9 @@ export default function Home() {
 						</section>
 					) : null}
 
-					{data && !data.needsGoogleAuth ? (
-						<section className="grid gap-4 lg:grid-cols-2">
-							<aside className="rounded-lg border bg-white p-4">
+						{data && !data.needsGoogleAuth ? (
+							<section className="grid gap-4 lg:grid-cols-4">
+								<aside className="rounded-lg border bg-white p-4 lg:col-span-1">
 								<h2 className="mb-3 font-semibold text-base">Categories</h2>
 								<div className="flex flex-col gap-1">
 									{orderedBuckets.map((bucket) => {
@@ -545,7 +710,7 @@ export default function Home() {
 								</div>
 							</aside>
 
-							<div className="rounded-lg border bg-white p-4">
+								<div className="rounded-lg border bg-white p-4 lg:col-span-3">
 								{showConfigure ? (
 									<div className="space-y-3">
 										<h3 className="font-semibold text-lg">

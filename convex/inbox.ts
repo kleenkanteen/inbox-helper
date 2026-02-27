@@ -27,6 +27,20 @@ const DEFAULT_BUCKETS = [
 	},
 ];
 
+const MAX_STORED_THREADS = 200;
+
+const compareThreadRecency = (
+	left: { id: string; receivedAt?: number },
+	right: { id: string; receivedAt?: number },
+) => {
+	const leftTime = typeof left.receivedAt === "number" ? left.receivedAt : 0;
+	const rightTime = typeof right.receivedAt === "number" ? right.receivedAt : 0;
+	if (leftTime !== rightTime) {
+		return rightTime - leftTime;
+	}
+	return left.id.localeCompare(right.id);
+};
+
 const ensureDefaults = async (ctx: any, userId: string) => {
 	const existing = await ctx.db
 		.query("bucketDefinitions")
@@ -229,6 +243,19 @@ export const saveThreadsAndClassifications = mutation({
 	},
 	handler: async (ctx, args) => {
 		const now = Date.now();
+		const newestThreads = [...args.threads]
+			.sort((left, right) =>
+				compareThreadRecency(
+					{ id: left.id, receivedAt: left.receivedAt },
+					{ id: right.id, receivedAt: right.receivedAt },
+				),
+			)
+			.slice(0, MAX_STORED_THREADS);
+		const newestThreadIdSet = new Set(newestThreads.map((thread) => thread.id));
+		const newestClassifications = args.classifications.filter(
+			(classification) => newestThreadIdSet.has(classification.threadId),
+		);
+
 		const oldThreads = await ctx.db
 			.query("threadSnapshots")
 			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
@@ -237,7 +264,7 @@ export const saveThreadsAndClassifications = mutation({
 			await ctx.db.delete(thread._id);
 		}
 
-		for (const thread of args.threads) {
+		for (const thread of newestThreads) {
 			const normalizedSnippet =
 				typeof thread.snippet === "string" && thread.snippet.trim().length > 0
 					? thread.snippet
@@ -263,7 +290,7 @@ export const saveThreadsAndClassifications = mutation({
 			await ctx.db.delete(classification._id);
 		}
 
-		for (const classification of args.classifications) {
+		for (const classification of newestClassifications) {
 			await ctx.db.insert("threadClassifications", {
 				userId: args.userId,
 				threadId: classification.threadId,
@@ -519,13 +546,18 @@ export const getInbox = query({
 					id: thread.threadId,
 					subject: thread.subject,
 					snippet:
-						typeof thread.snippet === "string" && thread.snippet.trim().length > 0
+						typeof thread.snippet === "string" &&
+						thread.snippet.trim().length > 0
 							? thread.snippet
 							: "(No preview available)",
 					receivedAt: thread.receivedAt,
 					confidence: 0,
 				});
 			}
+		}
+
+		for (const group of grouped.values()) {
+			group.threads.sort(compareThreadRecency);
 		}
 
 		return {
