@@ -12,6 +12,7 @@ import {
 import Head from "next/head";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SpinnerBadge } from "#/components/spinner-badge";
+import { env } from "#/env";
 import { authClient } from "#/server/better-auth/client";
 
 type BucketDefinition = {
@@ -55,6 +56,11 @@ const defaultBucketOrder = [
 	"Auto-Archive",
 	"Newsletter",
 ];
+
+const convexSiteUrl =
+	env.NEXT_PUBLIC_CONVEX_SITE_URL?.replace(/\/+$/, "") ?? "";
+const convexApiUrl = (path: string) =>
+	convexSiteUrl ? `${convexSiteUrl}${path}` : path;
 
 const buttonClass =
 	"cursor-pointer rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60";
@@ -107,7 +113,9 @@ export default function Home() {
 	const [categoryDrafts, setCategoryDrafts] = useState<
 		Record<string, { name: string; description: string }>
 	>({});
-	const [categoryActionKey, setCategoryActionKey] = useState<string | null>(null);
+	const [categoryActionKey, setCategoryActionKey] = useState<string | null>(
+		null,
+	);
 	const [hasNewMessages, setHasNewMessages] = useState(false);
 	const [newMessageCount, setNewMessageCount] = useState(0);
 
@@ -160,7 +168,7 @@ export default function Home() {
 	const loadThreads = useCallback(async () => {
 		setLoading(true);
 		setError(null);
-		const response = await fetch("/api/threads?limit=200", {
+		const response = await fetch(convexApiUrl("/api/threads?limit=200"), {
 			method: "GET",
 			cache: "no-store",
 		});
@@ -193,7 +201,7 @@ export default function Home() {
 				return;
 			}
 
-			const response = await fetch("/api/messages/check-new", {
+			const response = await fetch(convexApiUrl("/api/messages/check-new"), {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ knownIds: ids ?? knownThreadIds }),
@@ -234,7 +242,9 @@ export default function Home() {
 
 	const connectGoogle = useCallback(async () => {
 		setError(null);
-		const response = await fetch("/api/auth/google/start", { method: "POST" });
+		const response = await fetch(convexApiUrl("/api/auth/google/start"), {
+			method: "POST",
+		});
 		const payload = (await response.json()) as { url?: string; error?: string };
 		if (!response.ok || !payload.url) {
 			setError(payload.error ?? "Failed to start Google OAuth flow");
@@ -246,7 +256,9 @@ export default function Home() {
 	const logout = useCallback(async () => {
 		setError(null);
 
-		const response = await fetch("/api/logout", { method: "POST" });
+		const response = await fetch(convexApiUrl("/api/logout"), {
+			method: "POST",
+		});
 		if (!response.ok) {
 			setError("Failed to logout");
 			return;
@@ -262,7 +274,9 @@ export default function Home() {
 
 	const recategorize = useCallback(async () => {
 		setError(null);
-		const response = await fetch("/api/classify", { method: "POST" });
+		const response = await fetch(convexApiUrl("/api/classify"), {
+			method: "POST",
+		});
 		const payload = (await response.json()) as InboxResponse;
 		if (!response.ok) {
 			setError(payload.error ?? "Failed to recategorize threads");
@@ -289,7 +303,7 @@ export default function Home() {
 
 		setError(null);
 		setCategoryActionKey("create");
-		const response = await fetch("/api/buckets", {
+		const response = await fetch(convexApiUrl("/api/buckets"), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -334,7 +348,7 @@ export default function Home() {
 
 			setError(null);
 			setCategoryActionKey(`save-${bucket.id}`);
-			const response = await fetch("/api/buckets", {
+			const response = await fetch(convexApiUrl("/api/buckets"), {
 				method: "PUT",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
@@ -359,7 +373,7 @@ export default function Home() {
 	const deleteCategory = useCallback(async (bucketId: string) => {
 		setError(null);
 		setCategoryActionKey(`delete-${bucketId}`);
-		const response = await fetch("/api/buckets", {
+		const response = await fetch(convexApiUrl("/api/buckets"), {
 			method: "DELETE",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ id: bucketId }),
@@ -567,9 +581,9 @@ export default function Home() {
 										</div>
 										<button
 											className={buttonClass}
+											disabled={categoryActionKey !== null}
 											onClick={() => void createCategory()}
 											type="button"
-											disabled={categoryActionKey !== null}
 										>
 											{categoryActionKey === "create"
 												? "Creating..."
@@ -634,7 +648,8 @@ export default function Home() {
 																				...current,
 																				[bucket.id]: {
 																					name:
-																						current[bucket.id]?.name ?? bucket.name,
+																						current[bucket.id]?.name ??
+																						bucket.name,
 																					description: event.target.value,
 																				},
 																			}))

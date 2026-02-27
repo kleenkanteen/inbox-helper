@@ -3,7 +3,6 @@ import { createXai } from "@ai-sdk/xai";
 import { generateObject } from "ai";
 import { z } from "zod";
 
-import { env } from "#/env";
 import type {
 	BucketDefinition,
 	ThreadClassification,
@@ -13,38 +12,37 @@ import type {
 const XAI_MODEL_ID = "grok-4-1-fast-non-reasoning";
 const OPENAI_MODEL_ID = "gpt-4o-mini";
 const MAX_THREADS = 200;
-const BATCH_SIZE = 15;
 const PREVIEW_LIMIT = 300;
 const MODEL_TIMEOUT_MS = 45000;
+const MAX_CONCURRENT_CLASSIFICATIONS = 12;
+
+const getEnv = (key: string) => {
+	const value = process.env[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+};
 
 const truncatePreview = (value: string) => value.slice(0, PREVIEW_LIMIT);
 
 const classificationSchema = z.object({
-	classifications: z.array(
-		z.object({
-			threadId: z.string(),
-			bucketId: z.string(),
-			confidence: z.number().min(0).max(1),
-			reason: z.string().max(240),
-		}),
-	),
+	bucketId: z.string(),
+	confidence: z.number().min(0).max(1),
+	reason: z.string().max(240),
 });
 
-const classifyWithModel = async ({
+const classifySingleThreadWithModel = async ({
 	model,
-	threads,
+	thread,
 	buckets,
 }: {
 	model: Parameters<typeof generateObject>[0]["model"];
-	threads: ThreadSummary[],
+	thread: ThreadSummary;
 	buckets: BucketDefinition[];
-}): Promise<ThreadClassification[]> => {
-	const normalizedThreads = threads.slice(0, MAX_THREADS).map((thread) => ({
+}): Promise<ThreadClassification> => {
+	const normalizedThread = {
 		threadId: thread.id,
 		subject: thread.subject.trim() || "(No Subject)",
 		snippet: truncatePreview(thread.snippet),
-	}));
-
+	};
 	const bucketIndex = buckets.map((bucket) => ({
 		id: bucket.id,
 		name: bucket.name,
@@ -57,34 +55,21 @@ const classifyWithModel = async ({
 		temperature: 0,
 		system:
 			"You classify email threads into buckets. Only use the provided subject and preview. Never infer from sender or missing fields.",
-		prompt: `Classify every thread into exactly one bucket.\n\nBuckets:\n${JSON.stringify(bucketIndex)}\n\nThreads:\n${JSON.stringify(normalizedThreads)}\n\nReturn one classification per thread. Each classification must include the exact threadId from the input. bucketId must be one of the provided bucket ids. reason must always be present as a short string (use an empty string when no reason is needed).`,
+		prompt: `Classify exactly one thread into exactly one bucket.\n\nBuckets:\n${JSON.stringify(bucketIndex)}\n\nThread:\n${JSON.stringify(normalizedThread)}\n\nReturn only bucketId, confidence, and reason. bucketId must be one of the provided bucket ids. reason must always be present as a short string (use an empty string when no reason is needed).`,
 	});
 
 	const allowedBucketIds = new Set(buckets.map((bucket) => bucket.id));
-	const byThreadId = new Map(
-		object.classifications.map((classification) => [
-			classification.threadId,
-			classification,
-		]),
-	);
-
-	return normalizedThreads.map((thread) => {
-		const fromModel = byThreadId.get(thread.threadId);
-		if (!fromModel) {
-			throw new Error(`Missing classification for thread ${thread.threadId}`);
-		}
-		if (!allowedBucketIds.has(fromModel.bucketId)) {
-			throw new Error(
-				`Invalid bucketId '${fromModel.bucketId}' for thread ${thread.threadId}`,
-			);
-		}
-		return {
-			threadId: thread.threadId,
-			bucketId: fromModel.bucketId,
-			confidence: fromModel.confidence,
-			reason: fromModel.reason || undefined,
-		};
-	});
+	if (!allowedBucketIds.has(object.bucketId)) {
+		throw new Error(
+			`Invalid bucketId '${object.bucketId}' for thread ${normalizedThread.threadId}`,
+		);
+	}
+	return {
+		threadId: normalizedThread.threadId,
+		bucketId: object.bucketId,
+		confidence: object.confidence,
+		reason: object.reason || undefined,
+	};
 };
 
 const withTimeout = async <T>(
@@ -128,46 +113,65 @@ export const classifyThreads = async (
 		throw new Error("At least one bucket is required for fallback");
 	}
 
-	const classifyInBatches = async (
+	const classifyInParallel = async (
 		model: Parameters<typeof generateObject>[0]["model"],
 		label: string,
 	) => {
-		const results: ThreadClassification[] = [];
-		for (let index = 0; index < limited.length; index += BATCH_SIZE) {
-			const batch = limited.slice(index, index + BATCH_SIZE);
-			const batchResult = await withTimeout(
-				classifyWithModel({
-					model,
-					threads: batch,
-					buckets,
-				}),
-				MODEL_TIMEOUT_MS,
-				`${label} batch ${index / BATCH_SIZE + 1}`,
-			);
-			results.push(...batchResult);
-		}
+		const results = new Array<ThreadClassification>(limited.length);
+		const maxConcurrent = Math.max(
+			1,
+			Math.min(MAX_CONCURRENT_CLASSIFICATIONS, limited.length),
+		);
+		let nextIndex = 0;
+
+		const worker = async () => {
+			while (nextIndex < limited.length) {
+				const index = nextIndex;
+				nextIndex += 1;
+				const thread = limited[index];
+				if (!thread) {
+					continue;
+				}
+				const classified = await withTimeout(
+					classifySingleThreadWithModel({
+						model,
+						thread,
+						buckets,
+					}),
+					MODEL_TIMEOUT_MS,
+					`${label} thread ${thread.id}`,
+				);
+				results[index] = classified;
+			}
+		};
+
+		await Promise.all(
+			Array.from({ length: maxConcurrent }, () => worker()),
+		);
 		return results;
 	};
 
 	try {
-		if (!env.XAI_API_KEY) {
-			throw new Error("Missing XAI_API_KEY");
+		const xaiApiKey = getEnv("XAI_API_KEY");
+			if (!xaiApiKey) {
+				throw new Error("Missing XAI_API_KEY");
+			}
+			const xai = createXai({ apiKey: xaiApiKey });
+			return await classifyInParallel(xai(XAI_MODEL_ID), "xAI classification");
+		} catch (error) {
+			errors.push(`xAI failed: ${(error as Error).message}`);
 		}
-		const xai = createXai({ apiKey: env.XAI_API_KEY });
-		return await classifyInBatches(xai(XAI_MODEL_ID), "xAI classification");
-	} catch (error) {
-		errors.push(`xAI failed: ${(error as Error).message}`);
-	}
 
 	try {
-		if (!env.OPENAI_API_KEY) {
-			throw new Error("Missing OPENAI_API_KEY");
-		}
-		const openai = createOpenAI({ apiKey: env.OPENAI_API_KEY });
-		return await classifyInBatches(
-			openai(OPENAI_MODEL_ID),
-			"OpenAI classification",
-		);
+		const openAiApiKey = getEnv("OPENAI_API_KEY");
+			if (!openAiApiKey) {
+				throw new Error("Missing OPENAI_API_KEY");
+			}
+			const openai = createOpenAI({ apiKey: openAiApiKey });
+			return await classifyInParallel(
+				openai(OPENAI_MODEL_ID),
+				"OpenAI classification",
+			);
 	} catch (error) {
 		errors.push(`OpenAI failed: ${(error as Error).message}`);
 	}

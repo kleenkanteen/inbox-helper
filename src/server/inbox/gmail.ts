@@ -1,4 +1,3 @@
-import { env } from "#/env";
 import type { GoogleOAuthToken, ThreadSummary } from "#/server/inbox/types";
 
 const GMAIL_LIST_MESSAGES_URL =
@@ -6,6 +5,11 @@ const GMAIL_LIST_MESSAGES_URL =
 const GMAIL_GET_MESSAGE_URL =
 	"https://gmail.googleapis.com/gmail/v1/users/me/messages";
 const BODY_PREVIEW_LIMIT = 200;
+
+const getEnv = (key: string) => {
+	const value = process.env[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+};
 
 const parseMessage = (item: unknown): ThreadSummary | null => {
 	if (!item || typeof item !== "object") {
@@ -19,11 +23,13 @@ const parseMessage = (item: unknown): ThreadSummary | null => {
 	if (!value.id) {
 		return null;
 	}
-	const receivedAt = value.internalDate ? Number(value.internalDate) : undefined;
+	const receivedAt = value.internalDate
+		? Number(value.internalDate)
+		: undefined;
 	return {
 		id: value.id,
 		subject: "(No Subject)",
-		snippet: value.snippet ?? "",
+		snippet: value.snippet ? normalizeWhitespace(decodeHtmlEntities(value.snippet)) : "",
 		...(Number.isFinite(receivedAt) ? { receivedAt } : {}),
 	};
 };
@@ -64,19 +70,63 @@ const extractInternalDate = (payload: unknown): number | undefined => {
 	return Number.isFinite(timestamp) ? timestamp : undefined;
 };
 
+const extractSnippet = (payload: unknown): string | undefined => {
+	if (!payload || typeof payload !== "object") {
+		return undefined;
+	}
+	const value = payload as { snippet?: string };
+	const snippet = value.snippet
+		? normalizeWhitespace(decodeHtmlEntities(value.snippet))
+		: undefined;
+	return snippet && snippet.length > 0 ? snippet : undefined;
+};
+
 const decodeBase64Url = (value: string): string => {
 	try {
 		const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
 		const padding = normalized.length % 4;
 		const padded =
-			padding === 0 ? normalized : normalized.padEnd(normalized.length + (4 - padding), "=");
+			padding === 0
+				? normalized
+				: normalized.padEnd(normalized.length + (4 - padding), "=");
 		return Buffer.from(padded, "base64").toString("utf8");
 	} catch {
 		return "";
 	}
 };
 
-const normalizeWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
+const decodeHtmlEntities = (value: string): string => {
+	const namedEntities: Record<string, string> = {
+		amp: "&",
+		lt: "<",
+		gt: ">",
+		quot: '"',
+		apos: "'",
+		nbsp: " ",
+	};
+
+	return value.replace(
+		/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g,
+		(match, entity: string) => {
+			if (entity.startsWith("#x") || entity.startsWith("#X")) {
+				const codePoint = Number.parseInt(entity.slice(2), 16);
+				return Number.isFinite(codePoint)
+					? String.fromCodePoint(codePoint)
+					: match;
+			}
+			if (entity.startsWith("#")) {
+				const codePoint = Number.parseInt(entity.slice(1), 10);
+				return Number.isFinite(codePoint)
+					? String.fromCodePoint(codePoint)
+					: match;
+			}
+			return namedEntities[entity] ?? match;
+		},
+	);
+};
+
+const normalizeWhitespace = (value: string) =>
+	value.replace(/\s+/g, " ").trim();
 
 const stripHtml = (value: string): string => {
 	const noScripts = value
@@ -101,7 +151,7 @@ const collectBodyText = (
 	}
 
 	const decoded = part.body?.data
-		? normalizeWhitespace(decodeBase64Url(part.body.data))
+		? normalizeWhitespace(decodeHtmlEntities(decodeBase64Url(part.body.data)))
 		: "";
 	if (decoded) {
 		if (part.mimeType?.startsWith("text/plain")) {
@@ -148,7 +198,12 @@ const extractBodyPreview = (payload: unknown): string | undefined => {
 const fetchMessageDetails = async (
 	token: GoogleOAuthToken,
 	messageId: string,
-): Promise<{ subject?: string; bodyPreview?: string; receivedAt?: number }> => {
+): Promise<{
+	subject?: string;
+	bodyPreview?: string;
+	receivedAt?: number;
+	snippet?: string;
+}> => {
 	const url = new URL(`${GMAIL_GET_MESSAGE_URL}/${messageId}`);
 	url.searchParams.set("format", "full");
 
@@ -166,6 +221,7 @@ const fetchMessageDetails = async (
 		subject: extractSubject(payload),
 		bodyPreview: extractBodyPreview(payload),
 		receivedAt: extractInternalDate(payload),
+		snippet: extractSnippet(payload),
 	};
 };
 
@@ -177,6 +233,7 @@ const hydrateMessageDetails = async (
 	const queue = [...messages];
 	const subjectById = new Map<string, string>();
 	const bodyPreviewById = new Map<string, string>();
+	const snippetById = new Map<string, string>();
 	const receivedAtById = new Map<string, number>();
 
 	await Promise.all(
@@ -190,12 +247,15 @@ const hydrateMessageDetails = async (
 				if (details.subject) {
 					subjectById.set(message.id, details.subject);
 				}
-				if (details.bodyPreview) {
-					bodyPreviewById.set(message.id, details.bodyPreview);
-				}
-				if (typeof details.receivedAt === "number") {
-					receivedAtById.set(message.id, details.receivedAt);
-				}
+					if (details.bodyPreview) {
+						bodyPreviewById.set(message.id, details.bodyPreview);
+					}
+					if (details.snippet) {
+						snippetById.set(message.id, details.snippet);
+					}
+					if (typeof details.receivedAt === "number") {
+						receivedAtById.set(message.id, details.receivedAt);
+					}
 			}
 		}),
 	);
@@ -203,8 +263,20 @@ const hydrateMessageDetails = async (
 	return messages.map((message) => ({
 		...message,
 		subject: subjectById.get(message.id) ?? message.subject,
-		snippet: bodyPreviewById.get(message.id) ?? message.snippet,
+		snippet:
+			bodyPreviewById.get(message.id) ??
+			snippetById.get(message.id) ??
+			message.snippet?.trim() ??
+			"",
 		receivedAt: receivedAtById.get(message.id) ?? message.receivedAt,
+	})).map((message) => ({
+		...message,
+		snippet:
+			message.snippet.trim().length > 0
+				? decodeHtmlEntities(message.snippet)
+				: message.subject.trim().length > 0
+					? `Subject: ${message.subject}`
+					: "(No preview available)",
 	}));
 };
 
@@ -276,13 +348,13 @@ export const listRecentMessageIds = async (
 };
 
 export const exchangeCodeForGoogleToken = async (code: string) => {
-	const clientId = requiredEnv(env.GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID");
+	const clientId = requiredEnv(getEnv("GOOGLE_CLIENT_ID"), "GOOGLE_CLIENT_ID");
 	const clientSecret = requiredEnv(
-		env.GOOGLE_CLIENT_SECRET,
+		getEnv("GOOGLE_CLIENT_SECRET"),
 		"GOOGLE_CLIENT_SECRET",
 	);
 	const redirectUri = requiredEnv(
-		env.GOOGLE_REDIRECT_URI,
+		getEnv("GOOGLE_REDIRECT_URI"),
 		"GOOGLE_REDIRECT_URI",
 	);
 
@@ -326,9 +398,9 @@ export const exchangeCodeForGoogleToken = async (code: string) => {
 };
 
 export const buildGoogleConsentUrl = (state: string) => {
-	const clientId = requiredEnv(env.GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID");
+	const clientId = requiredEnv(getEnv("GOOGLE_CLIENT_ID"), "GOOGLE_CLIENT_ID");
 	const redirectUri = requiredEnv(
-		env.GOOGLE_REDIRECT_URI,
+		getEnv("GOOGLE_REDIRECT_URI"),
 		"GOOGLE_REDIRECT_URI",
 	);
 	const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");

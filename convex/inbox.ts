@@ -28,9 +28,10 @@ const DEFAULT_BUCKETS = [
 ];
 
 const ensureDefaults = async (ctx: any, userId: string) => {
-	const existing = (await ctx.db.query("bucketDefinitions").collect()).filter(
-		(bucket: { userId: string }) => bucket.userId === userId,
-	);
+	const existing = await ctx.db
+		.query("bucketDefinitions")
+		.withIndex("by_user", (q: any) => q.eq("userId", userId))
+		.collect();
 	if (existing.length > 0) {
 		return existing;
 	}
@@ -44,9 +45,10 @@ const ensureDefaults = async (ctx: any, userId: string) => {
 			createdAt: now,
 		});
 	}
-	return (await ctx.db.query("bucketDefinitions").collect()).filter(
-		(bucket: { userId: string }) => bucket.userId === userId,
-	);
+	return await ctx.db
+		.query("bucketDefinitions")
+		.withIndex("by_user", (q: any) => q.eq("userId", userId))
+		.collect();
 };
 
 export const ensureDefaultBuckets = mutation({
@@ -74,9 +76,10 @@ export const saveGoogleToken = mutation({
 		}),
 	},
 	handler: async (ctx, args) => {
-		const existing = (await ctx.db.query("oauthTokens").collect()).find(
-			(token: { userId: string }) => token.userId === args.userId,
-		);
+		const existing = await ctx.db
+			.query("oauthTokens")
+			.withIndex("by_user", (q: any) => q.eq("userId", args.userId))
+			.first();
 
 		const now = Date.now();
 		if (existing) {
@@ -109,9 +112,10 @@ export const saveGoogleToken = mutation({
 export const getGoogleToken = query({
 	args: { userId: v.string() },
 	handler: async (ctx, args) => {
-		const token = (await ctx.db.query("oauthTokens").collect()).find(
-			(entry: { userId: string }) => entry.userId === args.userId,
-		);
+		const token = await ctx.db
+			.query("oauthTokens")
+			.withIndex("by_user", (q: any) => q.eq("userId", args.userId))
+			.first();
 		if (!token) {
 			return null;
 		}
@@ -128,9 +132,10 @@ export const getGoogleToken = query({
 export const deleteGoogleToken = mutation({
 	args: { userId: v.string() },
 	handler: async (ctx, args) => {
-		const token = (await ctx.db.query("oauthTokens").collect()).find(
-			(entry: { userId: string }) => entry.userId === args.userId,
-		);
+		const token = await ctx.db
+			.query("oauthTokens")
+			.withIndex("by_user", (q: any) => q.eq("userId", args.userId))
+			.first();
 		if (!token) {
 			return null;
 		}
@@ -143,9 +148,10 @@ export const getThreadsAndBuckets = query({
 	args: { userId: v.string() },
 	handler: async (ctx, args) => {
 		const buckets = await ensureDefaults(ctx, args.userId);
-		const threads = (await ctx.db.query("threadSnapshots").collect()).filter(
-			(thread: { userId: string }) => thread.userId === args.userId,
-		);
+		const threads = await ctx.db
+			.query("threadSnapshots")
+			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
+			.collect();
 		return {
 			buckets: buckets.map((bucket: any) => ({
 				id: String(bucket._id),
@@ -179,12 +185,12 @@ export const getCachedClassifications = query({
 		}> = [];
 
 		for (const emailId of uniqueEmailIds) {
-			const cached = (
-				await ctx.db.query("emailClassificationCache").collect()
-			).find(
-				(entry: { userId: string; emailId: string }) =>
-					entry.userId === args.userId && entry.emailId === emailId,
-			);
+			const cached = await ctx.db
+				.query("emailClassificationCache")
+				.withIndex("by_user_email", (q: any) =>
+					q.eq("userId", args.userId).eq("emailId", emailId),
+				)
+				.first();
 			if (!cached) {
 				continue;
 			}
@@ -223,19 +229,24 @@ export const saveThreadsAndClassifications = mutation({
 	},
 	handler: async (ctx, args) => {
 		const now = Date.now();
-		const oldThreads = (await ctx.db.query("threadSnapshots").collect()).filter(
-			(thread: { userId: string }) => thread.userId === args.userId,
-		);
+		const oldThreads = await ctx.db
+			.query("threadSnapshots")
+			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
+			.collect();
 		for (const thread of oldThreads) {
 			await ctx.db.delete(thread._id);
 		}
 
 		for (const thread of args.threads) {
+			const normalizedSnippet =
+				typeof thread.snippet === "string" && thread.snippet.trim().length > 0
+					? thread.snippet
+					: "(No preview available)";
 			await ctx.db.insert("threadSnapshots", {
 				userId: args.userId,
 				threadId: thread.id,
 				subject: thread.subject,
-				snippet: thread.snippet,
+				snippet: normalizedSnippet,
 				...(typeof thread.receivedAt === "number"
 					? { receivedAt: thread.receivedAt }
 					: {}),
@@ -244,12 +255,10 @@ export const saveThreadsAndClassifications = mutation({
 			});
 		}
 
-		const oldClassifications = (
-			await ctx.db.query("threadClassifications").collect()
-		).filter(
-			(classification: { userId: string }) =>
-				classification.userId === args.userId,
-		);
+		const oldClassifications = await ctx.db
+			.query("threadClassifications")
+			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
+			.collect();
 		for (const classification of oldClassifications) {
 			await ctx.db.delete(classification._id);
 		}
@@ -281,12 +290,10 @@ export const saveClassifications = mutation({
 	},
 	handler: async (ctx, args) => {
 		const now = Date.now();
-		const oldClassifications = (
-			await ctx.db.query("threadClassifications").collect()
-		).filter(
-			(classification: { userId: string }) =>
-				classification.userId === args.userId,
-		);
+		const oldClassifications = await ctx.db
+			.query("threadClassifications")
+			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
+			.collect();
 		for (const classification of oldClassifications) {
 			await ctx.db.delete(classification._id);
 		}
@@ -336,12 +343,12 @@ export const upsertCachedClassifications = mutation({
 		}
 
 		for (const [emailId, value] of uniqueEntries.entries()) {
-			const existing = (
-				await ctx.db.query("emailClassificationCache").collect()
-			).find(
-				(entry: { userId: string; emailId: string }) =>
-					entry.userId === args.userId && entry.emailId === emailId,
-			);
+			const existing = await ctx.db
+				.query("emailClassificationCache")
+				.withIndex("by_user_email", (q: any) =>
+					q.eq("userId", args.userId).eq("emailId", emailId),
+				)
+				.first();
 
 			if (existing) {
 				await ctx.db.patch(existing._id, {
@@ -416,9 +423,10 @@ export const deleteBucket = mutation({
 			throw new Error("Bucket not found");
 		}
 
-		const allBuckets = (await ctx.db.query("bucketDefinitions").collect()).filter(
-			(entry: { userId: string }) => entry.userId === args.userId,
-		);
+		const allBuckets = await ctx.db
+			.query("bucketDefinitions")
+			.withIndex("by_user", (q: any) => q.eq("userId", args.userId))
+			.collect();
 		if (allBuckets.length <= 1) {
 			throw new Error("Cannot delete the last category");
 		}
@@ -431,19 +439,22 @@ export const getInbox = query({
 	args: { userId: v.string() },
 	handler: async (ctx, args) => {
 		const buckets = await ensureDefaults(ctx, args.userId);
-		const threads = (await ctx.db.query("threadSnapshots").collect()).filter(
-			(thread: { userId: string }) => thread.userId === args.userId,
-		);
-		const classifications = (
-			await ctx.db.query("threadClassifications").collect()
-		).filter(
-			(classification: { userId: string }) =>
-				classification.userId === args.userId,
-		);
+		const threads = await ctx.db
+			.query("threadSnapshots")
+			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
+			.collect();
+		const classifications = await ctx.db
+			.query("threadClassifications")
+			.withIndex("by_user_thread", (q: any) => q.eq("userId", args.userId))
+			.collect();
 
 		const threadMap = new Map(
 			threads.map((thread: any) => [thread.threadId, thread]),
 		);
+		const assignedThreadIds = new Set<string>();
+		const canWaitBucketId =
+			buckets.find((bucket: any) => bucket.name === "Can Wait")?._id ??
+			buckets[0]?._id;
 		const grouped = new Map<
 			string,
 			{
@@ -482,13 +493,39 @@ export const getInbox = query({
 			if (!thread || !target) {
 				continue;
 			}
+			assignedThreadIds.add(thread.threadId);
 			target.threads.push({
 				id: thread.threadId,
 				subject: thread.subject,
-				snippet: thread.snippet,
+				snippet:
+					typeof thread.snippet === "string" && thread.snippet.trim().length > 0
+						? thread.snippet
+						: "(No preview available)",
 				receivedAt: thread.receivedAt,
 				confidence: classification.confidence,
 			});
+		}
+
+		// Backstop: keep threads visible even if a classification is missing/invalid.
+		const fallbackGroup = canWaitBucketId
+			? grouped.get(String(canWaitBucketId))
+			: undefined;
+		if (fallbackGroup) {
+			for (const thread of threads) {
+				if (assignedThreadIds.has(thread.threadId)) {
+					continue;
+				}
+				fallbackGroup.threads.push({
+					id: thread.threadId,
+					subject: thread.subject,
+					snippet:
+						typeof thread.snippet === "string" && thread.snippet.trim().length > 0
+							? thread.snippet
+							: "(No preview available)",
+					receivedAt: thread.receivedAt,
+					confidence: 0,
+				});
+			}
 		}
 
 		return {

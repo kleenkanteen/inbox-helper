@@ -19,7 +19,9 @@ export const env = createEnv({
 			.enum(["development", "test", "production"])
 			.default("development"),
 	},
-	client: {},
+	client: {
+		NEXT_PUBLIC_CONVEX_SITE_URL: optionalInDev(),
+	},
 	runtimeEnv: {
 		BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
 		BETTER_AUTH_GITHUB_CLIENT_ID: process.env.BETTER_AUTH_GITHUB_CLIENT_ID,
@@ -32,6 +34,7 @@ export const env = createEnv({
 		XAI_API_KEY: process.env.XAI_API_KEY,
 		OPENAI_API_KEY: process.env.OPENAI_API_KEY,
 		NODE_ENV: process.env.NODE_ENV,
+		NEXT_PUBLIC_CONVEX_SITE_URL: process.env.NEXT_PUBLIC_CONVEX_SITE_URL,
 	},
 	skipValidation: !!process.env.SKIP_ENV_VALIDATION,
 	emptyStringAsUndefined: true,
