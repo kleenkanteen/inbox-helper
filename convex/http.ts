@@ -279,17 +279,12 @@ const getHandler = httpAction(async (ctx, request) => {
 	if (url.pathname === "/api/threads") {
 		const limit = 200;
 		try {
-			console.log("[/api/threads] STEP 1: start request handling");
 			const { userId } = await getUserFromRequest(request);
-			console.log("[/api/threads] STEP 2: resolved user", { userId });
 			const rateLimit = await enforceRateLimit(ctx, {
 				route: "threads_get",
 				userId,
 				limit: 30,
 				windowMs: 60_000,
-			});
-			console.log("[/api/threads] STEP 3: rate limit checked", {
-				allowed: rateLimit.allowed,
 			});
 			if (!rateLimit.allowed) {
 				return new Response(JSON.stringify({ error: "Rate limit exceeded" }), {
@@ -301,15 +296,9 @@ const getHandler = httpAction(async (ctx, request) => {
 			const buckets = (await ctx.runMutation(api.inbox.ensureDefaultBuckets, {
 				userId,
 			})) as BucketDefinition[];
-			console.log("[/api/threads] STEP 4: ensured buckets", {
-				bucketCount: buckets.length,
-			});
 			const token = (await ctx.runQuery(api.inbox.getGoogleToken, {
 				userId,
 			})) as GoogleOAuthToken | null;
-			console.log("[/api/threads] STEP 5: fetched Google token", {
-				hasToken: Boolean(token),
-			});
 
 			if (!token) {
 				return new Response(
@@ -326,11 +315,7 @@ const getHandler = httpAction(async (ctx, request) => {
 
 			let threads: ThreadSummary[];
 			try {
-				console.log("[/api/threads] STEP 6: fetching recent Gmail messages");
 				threads = await listRecentMessages(token, limit);
-				console.log("[/api/threads] STEP 7: fetched recent Gmail messages", {
-					threadCount: threads.length,
-				});
 			} catch (error) {
 				const message =
 					error instanceof Error
@@ -358,25 +343,18 @@ const getHandler = httpAction(async (ctx, request) => {
 				throw error;
 			}
 
-			console.log("[/api/threads] STEP 8: classifying unseen threads");
 			const classifications = await classifyUnseenThreads({
 				ctx,
 				userId,
 				threads,
 				buckets,
 			});
-			console.log("[/api/threads] STEP 9: computed classifications", {
-				classificationCount: classifications.length,
-			});
-			console.log("[/api/threads] STEP 10: saving threads + classifications");
 			await ctx.runMutation(api.inbox.saveThreadsAndClassifications, {
 				userId,
 				threads,
 				classifications,
 			});
-			console.log("[/api/threads] STEP 11: querying inbox");
 			const inbox = await ctx.runQuery(api.inbox.getInbox, { userId });
-			console.log("[/api/threads] STEP 12: responding success");
 
 			return new Response(JSON.stringify({ limit, ...inbox }), {
 				status: 200,
