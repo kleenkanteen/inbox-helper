@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { LogOut, MessageCircle, RefreshCw, Sparkles } from "lucide-react";
 import { buttonClass } from "#/components/inbox/lib/inbox-constants";
 
@@ -20,7 +21,15 @@ export function InboxHeader({
 }: InboxHeaderProps) {
 	return (
 		<header className="flex flex-wrap items-start justify-between gap-3">
-			<div>
+			<div className="flex items-center gap-3">
+				<Image
+					alt="Inbox Helper"
+					height={56}
+					priority
+					src="/inbox.jpg"
+					width={56}
+					className="h-14 w-14 rounded-md object-cover"
+				/>
 				<h1 className="font-bold text-3xl">Eagle Eye</h1>
 			</div>
 			<div className="flex gap-2">
