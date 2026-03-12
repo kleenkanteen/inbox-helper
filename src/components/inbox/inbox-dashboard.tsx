@@ -9,6 +9,7 @@ import { useInboxData } from "#/components/inbox/hooks/use-inbox-data";
 import { InboxHeader } from "#/components/inbox/inbox-header";
 import { buttonClass } from "#/components/inbox/lib/inbox-constants";
 import { SpinnerBadge } from "#/components/spinner-badge";
+import Link from "next/link";
 
 export function InboxDashboard() {
 	const inbox = useInboxData();
@@ -100,6 +101,18 @@ export function InboxDashboard() {
 					</section>
 				) : null}
 			</div>
+
+			<footer className="mx-auto w-full max-w-6xl px-6 pb-10">
+				<div className="flex items-center justify-center gap-4 text-slate-600 text-sm">
+					<Link className="hover:text-slate-900 hover:underline" href="/privacy-policy">
+						Privacy Policy
+					</Link>
+					<span aria-hidden="true">·</span>
+					<Link className="hover:text-slate-900 hover:underline" href="/terms">
+						Terms of Service
+					</Link>
+				</div>
+			</footer>
 
 			<ChatPane
 				chatError={chat.chatError}

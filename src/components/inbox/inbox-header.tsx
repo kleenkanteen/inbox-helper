@@ -30,7 +30,7 @@ export function InboxHeader({
 					width={56}
 					className="h-14 w-14 rounded-md object-cover"
 				/>
-				<h1 className="font-bold text-3xl">Eagle Eye</h1>
+				<h1 className="font-bold text-3xl">Inbox Helper</h1>
 			</div>
 			<div className="flex gap-2">
 				{showSignInButton ? (
